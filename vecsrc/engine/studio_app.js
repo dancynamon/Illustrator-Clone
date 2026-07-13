@@ -170,11 +170,15 @@
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
-  fileInput.accept = '.aqv,.json,application/json';
+  fileInput.accept = '.aqv,.json,.pdf,.ai,application/json,application/pdf';
   fileInput.addEventListener('change', () => {
     const f = fileInput.files[0];
     fileInput.value = '';
-    if (!f) return;
+    if (f) openAnyFile(f);
+  });
+  function openFile() { fileInput.click(); }
+
+  function openAqvFile(f) {
     const rd = new FileReader();
     rd.onload = () => {
       try {
@@ -186,8 +190,47 @@
       }
     };
     rd.readAsText(f);
+  }
+
+  function importPdfFile(f) {
+    f.arrayBuffer()
+      .then(buf => PDFIO.docFromPDF(new Uint8Array(buf), f.name))
+      .then(res => {
+        applyNewDoc(res.doc);
+        if (res.pageCount > 1) {
+          window.alert(f.name + ' has ' + res.pageCount +
+            ' pages; imported page 1 (one artboard per document).');
+        }
+      })
+      .catch(err => window.alert('Could not import "' + f.name + '": ' + err.message));
+  }
+
+  function openAnyFile(f) {
+    if (/\.(pdf|ai)$/i.test(f.name) || f.type === 'application/pdf') importPdfFile(f);
+    else openAqvFile(f);
+  }
+
+  // drag & drop anywhere: .aqv/.json projects and .pdf/.ai vector imports
+  window.addEventListener('dragover', e => e.preventDefault());
+  window.addEventListener('drop', e => {
+    e.preventDefault();
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f && /\.(aqv|json|pdf|ai)$/i.test(f.name)) openAnyFile(f);
   });
-  function openFile() { fileInput.click(); }
+
+  function exportPdfFile() {
+    try {
+      const bytes = PDFIO.exportDocPDF(state.doc);
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (state.doc.name || 'Untitled') + '.pdf';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    } catch (err) {
+      window.alert('Export failed: ' + err.message);
+    }
+  }
 
   // ---------- rendering ----------
   let dpr = 1, vw = 0, vh = 0;
@@ -353,6 +396,7 @@
       { label: 'New', run: newFile },
       { label: 'Open…', kbd: '⌘O', run: openFile },
       { label: 'Save', kbd: '⌘S', run: saveFile },
+      { label: 'Export PDF', kbd: '⌘E', run: exportPdfFile, enabled: () => state.doc.shapes.length > 0 },
     ],
     edit: [
       { label: 'Undo', kbd: '⌘Z', run: doUndo, enabled: () => C.canUndo(state.history) },
@@ -663,6 +707,7 @@
     if (mod && k === 'z') { doUndo(); e.preventDefault(); return; }
     if (mod && k === 's') { saveFile(); e.preventDefault(); return; }
     if (mod && k === 'o') { openFile(); e.preventDefault(); return; }
+    if (mod && k === 'e') { exportPdfFile(); e.preventDefault(); return; }
     if (mod && k === 'a') { selectAll(); e.preventDefault(); return; }
     if (mod && k === 'g') { e.shiftKey ? doUngroup() : doGroup(); e.preventDefault(); return; }
     if (mod && e.key === ']') { doArrange(e.shiftKey ? 'front' : 'forward'); e.preventDefault(); return; }
@@ -724,6 +769,7 @@
   window.VEC_STUDIO = {
     state, render, setTool, fitArtboard, VECCORE: C,
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
+    openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
   };
 })();
