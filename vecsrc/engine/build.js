@@ -1,6 +1,6 @@
 const fs = require('fs'), p = require('path'), d = __dirname;
 const shell = fs.readFileSync(p.join(d, 'studio_shell.html'), 'utf8');
-const order = ['veccore.js', 'studio_app.js'];
+const order = ['veccore.js', 'pdfio.js', 'studio_app.js'];
 const libs = order.map(f => '<script>\n' + fs.readFileSync(p.join(d, f), 'utf8') + '\n</script>').join('\n');
 const out = shell.replace('<!--LIBS-->', libs);
 const dest = p.join(d, '..', 'vector-studio.html');

@@ -3,6 +3,7 @@
 (() => {
   'use strict';
   const C = window.VECCORE;
+  const P = window.VECPDF;
   const $ = s => document.querySelector(s);
 
   const stagewrap = $('#stagewrap');
@@ -168,26 +169,99 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
-  const fileInput = document.createElement('input');
-  fileInput.type = 'file';
-  fileInput.accept = '.aqv,.json,application/json';
-  fileInput.addEventListener('change', () => {
-    const f = fileInput.files[0];
-    fileInput.value = '';
-    if (!f) return;
+  // ---------- import (.aqv project, vector .pdf/.ai) ----------
+  function baseName(name) { return String(name || 'Untitled').replace(/\.(aqv|json|pdf|ai)$/i, ''); }
+
+  function liveTextNote(res) {
+    if (res.hasLiveText) {
+      window.alert(res.textShows + ' live text object(s) were skipped — text isn’t imported as paths. ' +
+        'Outline the fonts (Type > Create Outlines) before saving the PDF to bring text in as vectors.');
+    }
+  }
+
+  // File > Open of a PDF/.ai: new document at the PDF page size, shapes as-is.
+  function openPdfBytes(name, u8) {
+    const res = P.parsePDFDoc(u8);
+    const doc = C.newDoc({ units: 'in', w: res.artboard.w / 72, h: res.artboard.h / 72 });
+    doc.name = baseName(name);
+    for (const s of res.shapes) C.addShape(doc, s);
+    applyNewDoc(doc);
+    liveTextNote(res);
+    if (!res.shapes.length && !res.hasLiveText) {
+      window.alert('No vector paths found in "' + name + '". Images and unsupported filters are skipped.');
+    }
+    return res;
+  }
+
+  // Drag-drop of a PDF/.ai: place into the current document as a grouped selection.
+  function placePdfBytes(name, u8) {
+    const res = P.parsePDFDoc(u8);
+    if (!res.shapes.length) {
+      liveTextNote(res);
+      if (!res.hasLiveText) window.alert('No vector paths found in "' + name + '".');
+      return res;
+    }
+    let ids = [];
+    mutate(d => {
+      ids = res.shapes.map(s => C.addShape(d, JSON.parse(JSON.stringify(s))).id);
+      if (ids.length >= 2) C.groupShapes(d, ids);
+    });
+    setSel(ids);
+    render();
+    liveTextNote(res);
+    return res;
+  }
+
+  // Route one File (picker or drop) by content: %PDF -> vector import, else .aqv JSON.
+  // `place` merges into the current doc instead of replacing it.
+  function openFileObject(f, place) {
     const rd = new FileReader();
     rd.onload = () => {
       try {
-        const doc = C.parseDoc(rd.result);
-        doc.name = f.name.replace(/\.(aqv|json)$/i, '');
-        applyNewDoc(doc);
+        const u8 = new Uint8Array(rd.result);
+        const head = String.fromCharCode.apply(null, u8.subarray(0, Math.min(1024, u8.length)));
+        if (head.indexOf('%PDF') >= 0 || /\.(pdf|ai)$/i.test(f.name)) {
+          place ? placePdfBytes(f.name, u8) : openPdfBytes(f.name, u8);
+        } else {
+          const doc = C.parseDoc(new TextDecoder().decode(u8));
+          doc.name = baseName(f.name);
+          applyNewDoc(doc);
+        }
       } catch (err) {
         window.alert('Could not open "' + f.name + '": ' + err.message);
       }
     };
-    rd.readAsText(f);
+    rd.readAsArrayBuffer(f);
+  }
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.aqv,.json,.pdf,.ai,application/json,application/pdf';
+  fileInput.addEventListener('change', () => {
+    const f = fileInput.files[0];
+    fileInput.value = '';
+    if (f) openFileObject(f, false);
   });
   function openFile() { fileInput.click(); }
+
+  // Drop anywhere on the canvas: .pdf/.ai place into the doc, .aqv opens as a doc.
+  stagewrap.addEventListener('dragover', e => { e.preventDefault(); });
+  stagewrap.addEventListener('drop', e => {
+    e.preventDefault();
+    for (const f of e.dataTransfer.files) {
+      openFileObject(f, /\.(pdf|ai)$/i.test(f.name));
+    }
+  });
+
+  // ---------- export (flat vector PDF at artboard size) ----------
+  function exportPDF() {
+    const blob = new Blob([P.buildPDFBytes(state.doc)], { type: 'application/pdf' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (state.doc.name || 'Untitled') + '.pdf';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
 
   // ---------- rendering ----------
   let dpr = 1, vw = 0, vh = 0;
@@ -353,6 +427,7 @@
       { label: 'New', run: newFile },
       { label: 'Open…', kbd: '⌘O', run: openFile },
       { label: 'Save', kbd: '⌘S', run: saveFile },
+      { label: 'Export PDF…', kbd: '⌘E', run: exportPDF, enabled: () => state.doc.shapes.length > 0 },
     ],
     edit: [
       { label: 'Undo', kbd: '⌘Z', run: doUndo, enabled: () => C.canUndo(state.history) },
@@ -663,6 +738,7 @@
     if (mod && k === 'z') { doUndo(); e.preventDefault(); return; }
     if (mod && k === 's') { saveFile(); e.preventDefault(); return; }
     if (mod && k === 'o') { openFile(); e.preventDefault(); return; }
+    if (mod && k === 'e') { exportPDF(); e.preventDefault(); return; }
     if (mod && k === 'a') { selectAll(); e.preventDefault(); return; }
     if (mod && k === 'g') { e.shiftKey ? doUngroup() : doGroup(); e.preventDefault(); return; }
     if (mod && e.key === ']') { doArrange(e.shiftKey ? 'front' : 'forward'); e.preventDefault(); return; }
@@ -722,8 +798,9 @@
 
   // debug handle
   window.VEC_STUDIO = {
-    state, render, setTool, fitArtboard, VECCORE: C,
+    state, render, setTool, fitArtboard, VECCORE: C, VECPDF: P,
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
+    openPdfBytes, placePdfBytes, exportPDF,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
   };
 })();
