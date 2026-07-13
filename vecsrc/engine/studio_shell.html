@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aquamentor Vector Studio</title>
+<style>
+  :root {
+    --bg: #323232;          /* app chrome */
+    --panel: #2a2a2b;       /* panel bodies */
+    --panel-head: #383838;  /* panel section headers */
+    --edge: #1f1f1f;        /* borders between chrome regions */
+    --canvas: #1b1b1b;      /* pasteboard behind artboard */
+    --text: #d6d6d6;
+    --text-dim: #9a9a9a;
+    --accent: #3a8ee6;      /* selection / active-tool blue */
+    --tool: #b8b8b8;        /* toolbar icon color */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+    display: grid;
+    grid-template-rows: 28px 1fr 22px;
+    grid-template-columns: 40px 1fr 240px;
+    grid-template-areas:
+      "menu menu menu"
+      "tools stage panels"
+      "status status status";
+    user-select: none; -webkit-user-select: none;
+  }
+
+  /* ---- menu bar ---- */
+  #menubar {
+    grid-area: menu; display: flex; align-items: center;
+    background: var(--bg); border-bottom: 1px solid var(--edge);
+    padding: 0 10px; gap: 2px;
+  }
+  #menubar .brand {
+    font-weight: 600; color: var(--text); margin-right: 14px;
+    letter-spacing: .2px;
+  }
+  #menubar .brand span { color: var(--accent); }
+  #menubar .menu {
+    padding: 3px 9px; border-radius: 3px; color: var(--text-dim); cursor: default;
+  }
+  #menubar .menu:hover, #menubar .menu.open { background: #3f3f40; color: var(--text); }
+
+  /* ---- dropdown menus ---- */
+  .dropdown {
+    position: fixed; min-width: 180px; z-index: 100;
+    background: #2f2f30; border: 1px solid #1a1a1a; border-radius: 4px;
+    padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.5);
+  }
+  .dropdown .item {
+    display: flex; justify-content: space-between; gap: 24px;
+    padding: 5px 10px; border-radius: 3px; color: var(--text); cursor: default;
+  }
+  .dropdown .item:hover:not(.disabled) { background: var(--accent); color: #fff; }
+  .dropdown .item.disabled { color: #6a6a6a; }
+  .dropdown .kbd { color: var(--text-dim); }
+  .dropdown .item:hover:not(.disabled) .kbd { color: #dbe9ff; }
+
+  /* ---- left toolbar ---- */
+  #toolbar {
+    grid-area: tools; background: var(--bg); border-right: 1px solid var(--edge);
+    display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 2px;
+  }
+  #toolbar button {
+    width: 32px; height: 30px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #toolbar button:hover { background: #3f3f40; color: #fff; }
+  #toolbar button.active { background: var(--accent); color: #fff; }
+  #toolbar .sep { width: 22px; height: 1px; background: var(--edge); margin: 4px 0; }
+  #toolbar svg { width: 17px; height: 17px; display: block; }
+
+  /* ---- stage ---- */
+  #stagewrap { grid-area: stage; position: relative; background: var(--canvas); overflow: hidden; }
+  #stage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #stagewrap.tool-hand #stage { cursor: grab; }
+  #stagewrap.tool-hand.panning #stage { cursor: grabbing; }
+  #stagewrap.tool-zoom #stage { cursor: zoom-in; }
+
+  /* ---- right panels ---- */
+  #panels {
+    grid-area: panels; background: var(--panel); border-left: 1px solid var(--edge);
+    display: flex; flex-direction: column; overflow-y: auto;
+  }
+  .panel { border-bottom: 1px solid var(--edge); }
+  .panel > h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--text-dim); background: var(--panel-head);
+    padding: 5px 10px; cursor: default;
+  }
+  .panel .body { padding: 8px 10px; }
+  .prow { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; }
+  .prow .k { color: var(--text-dim); }
+  .prow .v { color: var(--text); font-variant-numeric: tabular-nums; }
+  .pbtns { display: flex; gap: 6px; margin-top: 6px; }
+  .pbtns button {
+    flex: 1; padding: 4px 0; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--text); cursor: pointer; font-size: 11px;
+  }
+  .pbtns button:hover { background: #454546; }
+
+  /* align panel */
+  .alignrow { display: flex; gap: 4px; margin-bottom: 4px; }
+  .alignrow button {
+    width: 30px; height: 26px; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .alignrow button:hover:not([disabled]) { background: #454546; color: #fff; }
+  .alignrow button[disabled] { opacity: .35; cursor: default; }
+  .alignrow svg { width: 15px; height: 15px; }
+
+  /* layers list */
+  #layerlist { list-style: none; }
+  #layerlist li {
+    display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px;
+  }
+  #layerlist li:hover { background: #343435; }
+  #layerlist .eye { cursor: pointer; width: 16px; text-align: center; color: var(--text-dim); }
+  #layerlist .eye.on { color: var(--text); }
+  #layerlist .lname { flex: 1; }
+
+  /* ---- status bar ---- */
+  #statusbar {
+    grid-area: status; display: flex; align-items: center; gap: 18px;
+    background: var(--bg); border-top: 1px solid var(--edge);
+    padding: 0 12px; color: var(--text-dim); font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  #statusbar .right { margin-left: auto; display: flex; gap: 18px; }
+</style>
+</head>
+<body>
+
+<div id="menubar">
+  <div class="brand">AQ<span>Vector</span></div>
+  <div class="menu" data-menu="file">File</div>
+  <div class="menu" data-menu="edit">Edit</div>
+  <div class="menu" data-menu="object">Object</div>
+  <div class="menu">View</div>
+  <div class="menu">Window</div>
+</div>
+
+<div id="toolbar">
+  <button data-tool="select" title="Selection (V)">
+    <svg viewBox="0 0 20 20" fill="currentColor"><path d="M6 2 L6 16 L9.6 12.6 L12 18 L14.2 17 L11.8 11.8 L16.5 11.5 Z"/></svg>
+  </button>
+  <button data-tool="direct" title="Direct Selection (A)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2.8 L6 15 L9.4 11.9 L11.8 16.8 L13.7 15.9 L11.5 11.2 L15.6 10.9 Z"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button data-tool="pen" title="Pen (P)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2 L13 9 L10 13 L7 9 Z"/><path d="M10 13 L10 17"/><circle cx="10" cy="10" r="1" fill="currentColor" stroke="none"/></svg>
+  </button>
+  <button data-tool="rect" title="Rectangle (M)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3.5" y="5" width="13" height="10"/></svg>
+  </button>
+  <button data-tool="ellipse" title="Ellipse (L)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="10" cy="10" rx="6.5" ry="5"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button data-tool="hand" title="Hand (H) — or hold Space">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 10.5 V4.8 a1.2 1.2 0 0 1 2.4 0 V9 M9.4 9 V3.8 a1.2 1.2 0 0 1 2.4 0 V9 M11.8 9 V4.8 a1.2 1.2 0 0 1 2.4 0 V11.5 c0 3-1.8 5.5-4.6 5.5 c-2.4 0-3.6-1.2-4.8-3.6 L3.4 11.6 a1.15 1.15 0 0 1 2-1.1 L7 12.5"/></svg>
+  </button>
+  <button data-tool="zoom" title="Zoom (Z) — click in, Alt-click out">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="9" cy="9" r="5.5"/><path d="M13.2 13.2 L17 17"/><path d="M6.5 9 H11.5 M9 6.5 V11.5"/></svg>
+  </button>
+</div>
+
+<div id="stagewrap">
+  <canvas id="stage"></canvas>
+</div>
+
+<div id="panels">
+  <div class="panel">
+    <h2>Properties</h2>
+    <div class="body">
+      <div class="prow"><span class="k">Document</span><span class="v" id="p-name">—</span></div>
+      <div class="prow"><span class="k">Artboard</span><span class="v" id="p-artboard">—</span></div>
+      <div class="prow"><span class="k">Zoom</span><span class="v" id="p-zoom">—</span></div>
+      <div class="prow"><span class="k">Tool</span><span class="v" id="p-tool">—</span></div>
+      <div class="prow"><span class="k">Selection</span><span class="v" id="p-sel">—</span></div>
+      <div class="pbtns">
+        <button id="btn-fit" title="Cmd+0">Fit</button>
+        <button id="btn-100" title="Cmd+1">100%</button>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Align</h2>
+    <div class="body">
+      <div class="alignrow">
+        <button data-align="left" title="Align left edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 2v12"/><rect x="5" y="3.5" width="8" height="3.2"/><rect x="5" y="9.3" width="5" height="3.2"/></svg>
+        </button>
+        <button data-align="hcenter" title="Align horizontal centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 2v12"/><rect x="4" y="3.5" width="8" height="3.2"/><rect x="5.5" y="9.3" width="5" height="3.2"/></svg>
+        </button>
+        <button data-align="right" title="Align right edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M13 2v12"/><rect x="3" y="3.5" width="8" height="3.2"/><rect x="6" y="9.3" width="5" height="3.2"/></svg>
+        </button>
+        <button data-align="hdist" title="Distribute horizontal centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 3v10M8 3v10M13 3v10"/></svg>
+        </button>
+      </div>
+      <div class="alignrow">
+        <button data-align="top" title="Align top edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 3h12"/><rect x="3.5" y="5" width="3.2" height="8"/><rect x="9.3" y="5" width="3.2" height="5"/></svg>
+        </button>
+        <button data-align="vcenter" title="Align vertical centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 8h12"/><rect x="3.5" y="4" width="3.2" height="8"/><rect x="9.3" y="5.5" width="3.2" height="5"/></svg>
+        </button>
+        <button data-align="bottom" title="Align bottom edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 13h12"/><rect x="3.5" y="3" width="3.2" height="8"/><rect x="9.3" y="6" width="3.2" height="5"/></svg>
+        </button>
+        <button data-align="vdist" title="Distribute vertical centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 3h10M3 8h10M3 13h10"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Layers</h2>
+    <div class="body"><ul id="layerlist"></ul></div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <span id="s-coords">x: — y: —</span>
+  <div class="right">
+    <span id="s-tool">Selection</span>
+    <span id="s-zoom">100%</span>
+  </div>
+</div>
+
+<!--LIBS-->
+</body>
+</html>

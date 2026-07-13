@@ -1,0 +1,1537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aquamentor Vector Studio</title>
+<style>
+  :root {
+    --bg: #323232;          /* app chrome */
+    --panel: #2a2a2b;       /* panel bodies */
+    --panel-head: #383838;  /* panel section headers */
+    --edge: #1f1f1f;        /* borders between chrome regions */
+    --canvas: #1b1b1b;      /* pasteboard behind artboard */
+    --text: #d6d6d6;
+    --text-dim: #9a9a9a;
+    --accent: #3a8ee6;      /* selection / active-tool blue */
+    --tool: #b8b8b8;        /* toolbar icon color */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+    display: grid;
+    grid-template-rows: 28px 1fr 22px;
+    grid-template-columns: 40px 1fr 240px;
+    grid-template-areas:
+      "menu menu menu"
+      "tools stage panels"
+      "status status status";
+    user-select: none; -webkit-user-select: none;
+  }
+
+  /* ---- menu bar ---- */
+  #menubar {
+    grid-area: menu; display: flex; align-items: center;
+    background: var(--bg); border-bottom: 1px solid var(--edge);
+    padding: 0 10px; gap: 2px;
+  }
+  #menubar .brand {
+    font-weight: 600; color: var(--text); margin-right: 14px;
+    letter-spacing: .2px;
+  }
+  #menubar .brand span { color: var(--accent); }
+  #menubar .menu {
+    padding: 3px 9px; border-radius: 3px; color: var(--text-dim); cursor: default;
+  }
+  #menubar .menu:hover, #menubar .menu.open { background: #3f3f40; color: var(--text); }
+
+  /* ---- dropdown menus ---- */
+  .dropdown {
+    position: fixed; min-width: 180px; z-index: 100;
+    background: #2f2f30; border: 1px solid #1a1a1a; border-radius: 4px;
+    padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.5);
+  }
+  .dropdown .item {
+    display: flex; justify-content: space-between; gap: 24px;
+    padding: 5px 10px; border-radius: 3px; color: var(--text); cursor: default;
+  }
+  .dropdown .item:hover:not(.disabled) { background: var(--accent); color: #fff; }
+  .dropdown .item.disabled { color: #6a6a6a; }
+  .dropdown .kbd { color: var(--text-dim); }
+  .dropdown .item:hover:not(.disabled) .kbd { color: #dbe9ff; }
+
+  /* ---- left toolbar ---- */
+  #toolbar {
+    grid-area: tools; background: var(--bg); border-right: 1px solid var(--edge);
+    display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 2px;
+  }
+  #toolbar button {
+    width: 32px; height: 30px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #toolbar button:hover { background: #3f3f40; color: #fff; }
+  #toolbar button.active { background: var(--accent); color: #fff; }
+  #toolbar .sep { width: 22px; height: 1px; background: var(--edge); margin: 4px 0; }
+  #toolbar svg { width: 17px; height: 17px; display: block; }
+
+  /* ---- stage ---- */
+  #stagewrap { grid-area: stage; position: relative; background: var(--canvas); overflow: hidden; }
+  #stage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #stagewrap.tool-hand #stage { cursor: grab; }
+  #stagewrap.tool-hand.panning #stage { cursor: grabbing; }
+  #stagewrap.tool-zoom #stage { cursor: zoom-in; }
+
+  /* ---- right panels ---- */
+  #panels {
+    grid-area: panels; background: var(--panel); border-left: 1px solid var(--edge);
+    display: flex; flex-direction: column; overflow-y: auto;
+  }
+  .panel { border-bottom: 1px solid var(--edge); }
+  .panel > h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--text-dim); background: var(--panel-head);
+    padding: 5px 10px; cursor: default;
+  }
+  .panel .body { padding: 8px 10px; }
+  .prow { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; }
+  .prow .k { color: var(--text-dim); }
+  .prow .v { color: var(--text); font-variant-numeric: tabular-nums; }
+  .pbtns { display: flex; gap: 6px; margin-top: 6px; }
+  .pbtns button {
+    flex: 1; padding: 4px 0; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--text); cursor: pointer; font-size: 11px;
+  }
+  .pbtns button:hover { background: #454546; }
+
+  /* align panel */
+  .alignrow { display: flex; gap: 4px; margin-bottom: 4px; }
+  .alignrow button {
+    width: 30px; height: 26px; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .alignrow button:hover:not([disabled]) { background: #454546; color: #fff; }
+  .alignrow button[disabled] { opacity: .35; cursor: default; }
+  .alignrow svg { width: 15px; height: 15px; }
+
+  /* layers list */
+  #layerlist { list-style: none; }
+  #layerlist li {
+    display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px;
+  }
+  #layerlist li:hover { background: #343435; }
+  #layerlist .eye { cursor: pointer; width: 16px; text-align: center; color: var(--text-dim); }
+  #layerlist .eye.on { color: var(--text); }
+  #layerlist .lname { flex: 1; }
+
+  /* ---- status bar ---- */
+  #statusbar {
+    grid-area: status; display: flex; align-items: center; gap: 18px;
+    background: var(--bg); border-top: 1px solid var(--edge);
+    padding: 0 12px; color: var(--text-dim); font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  #statusbar .right { margin-left: auto; display: flex; gap: 18px; }
+</style>
+</head>
+<body>
+
+<div id="menubar">
+  <div class="brand">AQ<span>Vector</span></div>
+  <div class="menu" data-menu="file">File</div>
+  <div class="menu" data-menu="edit">Edit</div>
+  <div class="menu" data-menu="object">Object</div>
+  <div class="menu">View</div>
+  <div class="menu">Window</div>
+</div>
+
+<div id="toolbar">
+  <button data-tool="select" title="Selection (V)">
+    <svg viewBox="0 0 20 20" fill="currentColor"><path d="M6 2 L6 16 L9.6 12.6 L12 18 L14.2 17 L11.8 11.8 L16.5 11.5 Z"/></svg>
+  </button>
+  <button data-tool="direct" title="Direct Selection (A)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2.8 L6 15 L9.4 11.9 L11.8 16.8 L13.7 15.9 L11.5 11.2 L15.6 10.9 Z"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button data-tool="pen" title="Pen (P)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2 L13 9 L10 13 L7 9 Z"/><path d="M10 13 L10 17"/><circle cx="10" cy="10" r="1" fill="currentColor" stroke="none"/></svg>
+  </button>
+  <button data-tool="rect" title="Rectangle (M)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3.5" y="5" width="13" height="10"/></svg>
+  </button>
+  <button data-tool="ellipse" title="Ellipse (L)">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="10" cy="10" rx="6.5" ry="5"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button data-tool="hand" title="Hand (H) — or hold Space">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 10.5 V4.8 a1.2 1.2 0 0 1 2.4 0 V9 M9.4 9 V3.8 a1.2 1.2 0 0 1 2.4 0 V9 M11.8 9 V4.8 a1.2 1.2 0 0 1 2.4 0 V11.5 c0 3-1.8 5.5-4.6 5.5 c-2.4 0-3.6-1.2-4.8-3.6 L3.4 11.6 a1.15 1.15 0 0 1 2-1.1 L7 12.5"/></svg>
+  </button>
+  <button data-tool="zoom" title="Zoom (Z) — click in, Alt-click out">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="9" cy="9" r="5.5"/><path d="M13.2 13.2 L17 17"/><path d="M6.5 9 H11.5 M9 6.5 V11.5"/></svg>
+  </button>
+</div>
+
+<div id="stagewrap">
+  <canvas id="stage"></canvas>
+</div>
+
+<div id="panels">
+  <div class="panel">
+    <h2>Properties</h2>
+    <div class="body">
+      <div class="prow"><span class="k">Document</span><span class="v" id="p-name">—</span></div>
+      <div class="prow"><span class="k">Artboard</span><span class="v" id="p-artboard">—</span></div>
+      <div class="prow"><span class="k">Zoom</span><span class="v" id="p-zoom">—</span></div>
+      <div class="prow"><span class="k">Tool</span><span class="v" id="p-tool">—</span></div>
+      <div class="prow"><span class="k">Selection</span><span class="v" id="p-sel">—</span></div>
+      <div class="pbtns">
+        <button id="btn-fit" title="Cmd+0">Fit</button>
+        <button id="btn-100" title="Cmd+1">100%</button>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Align</h2>
+    <div class="body">
+      <div class="alignrow">
+        <button data-align="left" title="Align left edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 2v12"/><rect x="5" y="3.5" width="8" height="3.2"/><rect x="5" y="9.3" width="5" height="3.2"/></svg>
+        </button>
+        <button data-align="hcenter" title="Align horizontal centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 2v12"/><rect x="4" y="3.5" width="8" height="3.2"/><rect x="5.5" y="9.3" width="5" height="3.2"/></svg>
+        </button>
+        <button data-align="right" title="Align right edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M13 2v12"/><rect x="3" y="3.5" width="8" height="3.2"/><rect x="6" y="9.3" width="5" height="3.2"/></svg>
+        </button>
+        <button data-align="hdist" title="Distribute horizontal centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 3v10M8 3v10M13 3v10"/></svg>
+        </button>
+      </div>
+      <div class="alignrow">
+        <button data-align="top" title="Align top edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 3h12"/><rect x="3.5" y="5" width="3.2" height="8"/><rect x="9.3" y="5" width="3.2" height="5"/></svg>
+        </button>
+        <button data-align="vcenter" title="Align vertical centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 8h12"/><rect x="3.5" y="4" width="3.2" height="8"/><rect x="9.3" y="5.5" width="3.2" height="5"/></svg>
+        </button>
+        <button data-align="bottom" title="Align bottom edges">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 13h12"/><rect x="3.5" y="3" width="3.2" height="8"/><rect x="9.3" y="6" width="3.2" height="5"/></svg>
+        </button>
+        <button data-align="vdist" title="Distribute vertical centers">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 3h10M3 8h10M3 13h10"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Layers</h2>
+    <div class="body"><ul id="layerlist"></ul></div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <span id="s-coords">x: — y: —</span>
+  <div class="right">
+    <span id="s-tool">Selection</span>
+    <span id="s-zoom">100%</span>
+  </div>
+</div>
+
+<script>
+// VECCORE — pure document/geometry core for Aquamentor Vector Studio.
+// No DOM. Document coordinates are PDF points (1/72 in), y-down like SVG;
+// the PDF exporter flips y. Loaded in-browser via build concat and in node
+// tests via require.
+const VECCORE = (() => {
+  'use strict';
+
+  const PT_PER = { in: 72, mm: 72 / 25.4, pt: 1 };
+  // 100% zoom = 96 CSS px per inch (screen convention), i.e. 96/72 px per pt.
+  const PX_PER_PT_100 = 96 / 72;
+
+  // ---------- document ----------
+  function newDoc(o = {}) {
+    const units = o.units || 'in';
+    const k = PT_PER[units];
+    return {
+      name: o.name || 'Untitled',
+      units,
+      artboard: { w: (o.w != null ? o.w : 8.5) * k, h: (o.h != null ? o.h : 11) * k },
+      layers: [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }],
+      shapes: [],
+      groups: [],
+      nextId: 1,
+    };
+  }
+
+  function addShape(doc, shape) {
+    shape.id = 'S' + doc.nextId++;
+    if (!shape.layer) shape.layer = doc.layers[0].id;
+    if (shape.fill === undefined) shape.fill = null;
+    if (shape.stroke === undefined) shape.stroke = null;
+    if (shape.opacity == null) shape.opacity = 1;
+    if (shape.group === undefined) shape.group = null;
+    doc.shapes.push(shape);
+    return shape;
+  }
+
+  // ---------- view (world pt <-> screen px) ----------
+  // screen = world*scale + t
+  function newView() { return { scale: PX_PER_PT_100, tx: 0, ty: 0 }; }
+  function w2s(v, x, y) { return [x * v.scale + v.tx, y * v.scale + v.ty]; }
+  function s2w(v, x, y) { return [(x - v.tx) / v.scale, (y - v.ty) / v.scale]; }
+
+  // Zoom by factor f keeping screen point (sx,sy) fixed on the same world point.
+  function zoomAt(v, sx, sy, f, min = 0.02, max = 96) {
+    const ns = Math.min(max, Math.max(min, v.scale * f));
+    const wx = (sx - v.tx) / v.scale, wy = (sy - v.ty) / v.scale;
+    return { scale: ns, tx: sx - wx * ns, ty: sy - wy * ns };
+  }
+
+  function panBy(v, dx, dy) { return { scale: v.scale, tx: v.tx + dx, ty: v.ty + dy }; }
+
+  // View that fits world rect (x,y,w,h) centered in a vw×vh viewport.
+  // Padding shrinks on small viewports; scale is always positive.
+  function fitRect(vw, vh, x, y, w, h, pad = 40) {
+    pad = Math.max(0, Math.min(pad, vw * 0.1, vh * 0.1));
+    const s = Math.max(1e-6, Math.min((vw - 2 * pad) / w, (vh - 2 * pad) / h));
+    return { scale: s, tx: (vw - w * s) / 2 - x * s, ty: (vh - h * s) / 2 - y * s };
+  }
+
+  function zoomPct(v) { return v.scale / PX_PER_PT_100 * 100; }
+
+  // ---------- paths ----------
+  // A path is an array of commands: ['M',x,y] ['L',x,y] ['C',x1,y1,x2,y2,x,y] ['Z'].
+  // Maps 1:1 onto canvas, SVG, and PDF operators.
+
+  const KAPPA = 0.5522847498307936; // cubic circle approximation constant
+
+  function rectPath(x, y, w, h, r = 0) {
+    if (r <= 0) return [['M', x, y], ['L', x + w, y], ['L', x + w, y + h], ['L', x, y + h], ['Z']];
+    r = Math.min(r, w / 2, h / 2);
+    const k = KAPPA * r;
+    return [
+      ['M', x + r, y],
+      ['L', x + w - r, y], ['C', x + w - r + k, y, x + w, y + r - k, x + w, y + r],
+      ['L', x + w, y + h - r], ['C', x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h],
+      ['L', x + r, y + h], ['C', x + r - k, y + h, x, y + h - r + k, x, y + h - r],
+      ['L', x, y + r], ['C', x, y + r - k, x + r - k, y, x + r, y],
+      ['Z'],
+    ];
+  }
+
+  function ellipsePath(cx, cy, rx, ry) {
+    const kx = KAPPA * rx, ky = KAPPA * ry;
+    return [
+      ['M', cx + rx, cy],
+      ['C', cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry],
+      ['C', cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy],
+      ['C', cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry],
+      ['C', cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy],
+      ['Z'],
+    ];
+  }
+
+  function starPath(cx, cy, rOut, rIn, points = 5) {
+    const cmds = [];
+    for (let i = 0; i < points * 2; i++) {
+      const r = i % 2 === 0 ? rOut : rIn;
+      const a = -Math.PI / 2 + i * Math.PI / points;
+      cmds.push([i === 0 ? 'M' : 'L', cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+    }
+    cmds.push(['Z']);
+    return cmds;
+  }
+
+  // Bounding box over all coordinates in the command list (control points
+  // included — conservative for curves, exact for the shapes above).
+  function pathBBox(cmds) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const c of cmds) {
+      for (let i = 1; i + 1 <= c.length; i += 2) {
+        const x = c[i], y = c[i + 1];
+        if (typeof x !== 'number' || typeof y !== 'number') continue;
+        if (x < x0) x0 = x; if (y < y0) y0 = y;
+        if (x > x1) x1 = x; if (y > y1) y1 = y;
+      }
+    }
+    if (x0 === Infinity) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  // ---------- affine matrices ----------
+  // m = [a,b,c,d,e,f]: x' = a·x + c·y + e ; y' = b·x + d·y + f
+  function mMul(m2, m1) { // m1 applied first, then m2
+    return [
+      m2[0] * m1[0] + m2[2] * m1[1], m2[1] * m1[0] + m2[3] * m1[1],
+      m2[0] * m1[2] + m2[2] * m1[3], m2[1] * m1[2] + m2[3] * m1[3],
+      m2[0] * m1[4] + m2[2] * m1[5] + m2[4], m2[1] * m1[4] + m2[3] * m1[5] + m2[5],
+    ];
+  }
+  function mTranslate(dx, dy) { return [1, 0, 0, 1, dx, dy]; }
+  function mScale(sx, sy, cx = 0, cy = 0) { return [sx, 0, 0, sy, cx - sx * cx, cy - sy * cy]; }
+  function mRotate(rad, cx = 0, cy = 0) {
+    const c = Math.cos(rad), s = Math.sin(rad);
+    return [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy];
+  }
+  function mApply(m, x, y) { return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; }
+
+  function transformCmds(cmds, m) {
+    return cmds.map(c => {
+      if (c[0] === 'Z') return ['Z'];
+      const o = [c[0]];
+      for (let i = 1; i + 1 <= c.length; i += 2) {
+        const p = mApply(m, c[i], c[i + 1]);
+        o.push(p[0], p[1]);
+      }
+      return o;
+    });
+  }
+
+  // ---------- flattening, tight bounds, hit testing ----------
+  // Flatten to polyline subpaths: [{pts:[[x,y]...], closed}]. Fixed cubic
+  // subdivision is plenty for hit tests and bounds at document scale.
+  function flattenPath(cmds, seg = 16) {
+    const subs = [];
+    let cur = null, sx = 0, sy = 0, px = 0, py = 0;
+    for (const c of cmds) {
+      if (c[0] === 'M') {
+        cur = { pts: [[c[1], c[2]]], closed: false };
+        subs.push(cur);
+        px = sx = c[1]; py = sy = c[2];
+      } else if (c[0] === 'L') {
+        if (!cur) continue;
+        cur.pts.push([c[1], c[2]]);
+        px = c[1]; py = c[2];
+      } else if (c[0] === 'C') {
+        if (!cur) continue;
+        for (let i = 1; i <= seg; i++) {
+          const t = i / seg, u = 1 - t;
+          cur.pts.push([
+            u * u * u * px + 3 * u * u * t * c[1] + 3 * u * t * t * c[3] + t * t * t * c[5],
+            u * u * u * py + 3 * u * u * t * c[2] + 3 * u * t * t * c[4] + t * t * t * c[6],
+          ]);
+        }
+        px = c[5]; py = c[6];
+      } else if (c[0] === 'Z') {
+        if (cur) cur.closed = true;
+        px = sx; py = sy;
+      }
+    }
+    return subs;
+  }
+
+  function tightBBox(cmds) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of flattenPath(cmds)) {
+      for (const p of s.pts) {
+        if (p[0] < x0) x0 = p[0]; if (p[1] < y0) y0 = p[1];
+        if (p[0] > x1) x1 = p[0]; if (p[1] > y1) y1 = p[1];
+      }
+    }
+    return x0 === Infinity ? null : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  function shapesBBox(shapes) {
+    let out = null;
+    for (const s of shapes) {
+      const b = tightBBox(s.cmds);
+      if (!b) continue;
+      if (!out) out = { ...b };
+      else {
+        const x1 = Math.max(out.x + out.w, b.x + b.w), y1 = Math.max(out.y + out.h, b.y + b.h);
+        out.x = Math.min(out.x, b.x); out.y = Math.min(out.y, b.y);
+        out.w = x1 - out.x; out.h = y1 - out.y;
+      }
+    }
+    return out;
+  }
+
+  function windingNumber(pts, x, y) {
+    let wn = 0;
+    for (let i = 0, n = pts.length; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const cross = (b[0] - a[0]) * (y - a[1]) - (x - a[0]) * (b[1] - a[1]);
+      if (a[1] <= y) { if (b[1] > y && cross > 0) wn++; }
+      else if (b[1] <= y && cross < 0) wn--;
+    }
+    return wn;
+  }
+
+  function distToSubpath(sub, x, y) {
+    const pts = sub.pts, n = pts.length;
+    const last = sub.closed ? n : n - 1;
+    let d = Infinity;
+    for (let i = 0; i < last; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const L2 = dx * dx + dy * dy;
+      let t = L2 ? ((x - a[0]) * dx + (y - a[1]) * dy) / L2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      d = Math.min(d, Math.hypot(a[0] + t * dx - x, a[1] + t * dy - y));
+    }
+    return d;
+  }
+
+  // Fill hit uses nonzero winding summed across subpaths (canvas default, so
+  // holes behave like they render). Stroke hit uses distance to the outline.
+  function hitTestShape(shape, x, y, tol = 2) {
+    const subs = flattenPath(shape.cmds);
+    if (shape.fill != null) {
+      let wn = 0;
+      for (const s of subs) wn += windingNumber(s.pts, x, y);
+      if (wn !== 0) return true;
+    }
+    const strokeTol = Math.max(tol, shape.stroke ? shape.stroke.w / 2 + tol / 2 : 0);
+    if (shape.stroke || shape.fill == null) {
+      for (const s of subs) if (distToSubpath(s, x, y) <= strokeTol) return true;
+    }
+    return false;
+  }
+
+  function rectsIntersect(a, b) {
+    return a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+  }
+
+  // ---------- groups ----------
+  // Flat shape list stays the z-order truth; groups are a registry
+  // doc.groups = [{id:'G7', parent:'G9'|null}], shapes carry .group = innermost id.
+  function groupEntry(doc, gid) { return (doc.groups || []).find(g => g.id === gid) || null; }
+
+  function rootGroupOf(doc, shape) {
+    let gid = shape.group || null, seen = new Set();
+    while (gid && !seen.has(gid)) {
+      seen.add(gid);
+      const g = groupEntry(doc, gid);
+      if (!g || !g.parent) break;
+      gid = g.parent;
+    }
+    return gid;
+  }
+
+  function rootKeyOf(doc, shape) { return rootGroupOf(doc, shape) || shape.id; }
+
+  // Expand shape ids to full group membership (by shared root).
+  function expandIds(doc, ids) {
+    const set = new Set(ids);
+    const roots = new Set();
+    for (const s of doc.shapes) if (set.has(s.id)) roots.add(rootKeyOf(doc, s));
+    return doc.shapes.filter(s => roots.has(rootKeyOf(doc, s))).map(s => s.id);
+  }
+
+  // Partition an (expanded) selection into rigid units: one per root group,
+  // one per loose shape. Each unit: {key, ids, bbox}.
+  function selectionUnits(doc, ids) {
+    const set = new Set(expandIds(doc, ids));
+    const byKey = new Map();
+    for (const s of doc.shapes) {
+      if (!set.has(s.id)) continue;
+      const key = rootKeyOf(doc, s);
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(s);
+    }
+    return [...byKey.entries()].map(([key, shapes]) => ({
+      key, ids: shapes.map(s => s.id), bbox: shapesBBox(shapes),
+    }));
+  }
+
+  function groupShapes(doc, ids) {
+    const units = selectionUnits(doc, ids);
+    if (units.length < 2) return null;
+    if (!doc.groups) doc.groups = [];
+    const gid = 'G' + doc.nextId++;
+    doc.groups.push({ id: gid, parent: null });
+    for (const u of units) {
+      if (u.key[0] === 'G') groupEntry(doc, u.key).parent = gid;
+      else {
+        const s = doc.shapes.find(s => s.id === u.key);
+        if (s) s.group = gid;
+      }
+    }
+    return gid;
+  }
+
+  // Dissolve one (root) group: direct children become free units.
+  function ungroupShapes(doc, gid) {
+    for (const g of doc.groups) if (g.parent === gid) g.parent = null;
+    for (const s of doc.shapes) if (s.group === gid) s.group = null;
+    doc.groups = doc.groups.filter(g => g.id !== gid);
+  }
+
+  // Clone shapes (expanded to full groups) with a parallel cloned group tree.
+  // Clones append on top in original relative order; returns new shape ids.
+  function duplicateShapes(doc, ids) {
+    const set = new Set(expandIds(doc, ids));
+    const gidMap = new Map(); // old gid -> new gid
+    function cloneGroupChain(gid) {
+      if (!gid) return null;
+      if (gidMap.has(gid)) return gidMap.get(gid);
+      const g = groupEntry(doc, gid);
+      const ng = 'G' + doc.nextId++;
+      gidMap.set(gid, ng);
+      doc.groups.push({ id: ng, parent: g ? cloneGroupChain(g.parent) : null });
+      return ng;
+    }
+    const out = [];
+    for (const s of doc.shapes.slice()) {
+      if (!set.has(s.id)) continue;
+      const copy = JSON.parse(JSON.stringify(s));
+      copy.id = 'S' + doc.nextId++;
+      copy.group = cloneGroupChain(s.group);
+      doc.shapes.push(copy);
+      out.push(copy.id);
+    }
+    return out;
+  }
+
+  // ---------- z-order (array order = z, last is frontmost) ----------
+  function bringToFront(doc, ids) {
+    const set = new Set(ids);
+    const sel = doc.shapes.filter(s => set.has(s.id));
+    doc.shapes = doc.shapes.filter(s => !set.has(s.id)).concat(sel);
+  }
+  function sendToBack(doc, ids) {
+    const set = new Set(ids);
+    const sel = doc.shapes.filter(s => set.has(s.id));
+    doc.shapes = sel.concat(doc.shapes.filter(s => !set.has(s.id)));
+  }
+  function bringForward(doc, ids) {
+    const set = new Set(ids), a = doc.shapes;
+    for (let i = a.length - 2; i >= 0; i--) {
+      if (set.has(a[i].id) && !set.has(a[i + 1].id)) {
+        const t = a[i]; a[i] = a[i + 1]; a[i + 1] = t;
+      }
+    }
+  }
+  function sendBackward(doc, ids) {
+    const set = new Set(ids), a = doc.shapes;
+    for (let i = 1; i < a.length; i++) {
+      if (set.has(a[i].id) && !set.has(a[i - 1].id)) {
+        const t = a[i]; a[i] = a[i - 1]; a[i - 1] = t;
+      }
+    }
+  }
+
+  // ---------- align & distribute ----------
+  // Units move rigidly. Align modes reference the selection bbox; distribute
+  // spaces unit centers evenly between the two extremes.
+  function alignUnits(doc, ids, mode) {
+    const units = selectionUnits(doc, ids);
+    if (!units.length) return;
+    const shapesById = new Map(doc.shapes.map(s => [s.id, s]));
+    function moveUnit(u, dx, dy) {
+      if (!dx && !dy) return;
+      const m = mTranslate(dx, dy);
+      for (const id of u.ids) {
+        const s = shapesById.get(id);
+        s.cmds = transformCmds(s.cmds, m);
+      }
+    }
+    if (mode === 'hdist' || mode === 'vdist') {
+      if (units.length < 3) return;
+      const horiz = mode === 'hdist';
+      const c = u => horiz ? u.bbox.x + u.bbox.w / 2 : u.bbox.y + u.bbox.h / 2;
+      const sorted = units.slice().sort((a, b) => c(a) - c(b));
+      const lo = c(sorted[0]), hi = c(sorted[sorted.length - 1]);
+      const step = (hi - lo) / (sorted.length - 1);
+      sorted.forEach((u, i) => {
+        const d = lo + i * step - c(u);
+        moveUnit(u, horiz ? d : 0, horiz ? 0 : d);
+      });
+      return;
+    }
+    const all = { x: Math.min(...units.map(u => u.bbox.x)), y: Math.min(...units.map(u => u.bbox.y)) };
+    all.w = Math.max(...units.map(u => u.bbox.x + u.bbox.w)) - all.x;
+    all.h = Math.max(...units.map(u => u.bbox.y + u.bbox.h)) - all.y;
+    for (const u of units) {
+      const b = u.bbox;
+      let dx = 0, dy = 0;
+      if (mode === 'left') dx = all.x - b.x;
+      else if (mode === 'hcenter') dx = all.x + all.w / 2 - (b.x + b.w / 2);
+      else if (mode === 'right') dx = all.x + all.w - (b.x + b.w);
+      else if (mode === 'top') dy = all.y - b.y;
+      else if (mode === 'vcenter') dy = all.y + all.h / 2 - (b.y + b.h / 2);
+      else if (mode === 'bottom') dy = all.y + all.h - (b.y + b.h);
+      moveUnit(u, dx, dy);
+    }
+  }
+
+  // ---------- serialization (.aqv project format) ----------
+  const APP_ID = 'aq-vector-studio';
+  const FORMAT_VERSION = 1;
+  const CMD_ARITY = { M: 3, L: 3, C: 7, Z: 1 };
+
+  function serializeDoc(doc) {
+    return JSON.stringify({ app: APP_ID, version: FORMAT_VERSION, doc });
+  }
+
+  // Parse + validate a serialized project. Throws with a human message on
+  // anything structurally wrong; heals what can be healed (ids, layers,
+  // units, name) so old/hand-edited files still open.
+  function parseDoc(str) {
+    let o;
+    try { o = JSON.parse(str); } catch (e) { throw new Error('not valid JSON'); }
+    if (!o || o.app !== APP_ID) throw new Error('not an Aquamentor Vector Studio file');
+    if (typeof o.version !== 'number' || o.version > FORMAT_VERSION) throw new Error('unsupported file version');
+    const d = o.doc;
+    if (!d || typeof d !== 'object') throw new Error('missing document');
+    if (!d.artboard || !isFinite(d.artboard.w) || !isFinite(d.artboard.h)
+      || d.artboard.w <= 0 || d.artboard.h <= 0) throw new Error('bad artboard');
+    if (!PT_PER[d.units]) d.units = 'in';
+    if (typeof d.name !== 'string' || !d.name) d.name = 'Untitled';
+    if (!Array.isArray(d.layers) || !d.layers.length) {
+      d.layers = [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }];
+    }
+    for (const l of d.layers) {
+      if (typeof l.id !== 'string' || !l.id) throw new Error('bad layer');
+      l.name = String(l.name || l.id);
+      l.visible = l.visible !== false;
+      l.locked = !!l.locked;
+    }
+    if (!Array.isArray(d.shapes)) d.shapes = [];
+    const layerIds = new Set(d.layers.map(l => l.id));
+    let maxId = 0;
+    for (const s of d.shapes) {
+      if (!s || !Array.isArray(s.cmds) || !s.cmds.length) throw new Error('bad shape');
+      for (const c of s.cmds) {
+        if (!Array.isArray(c) || CMD_ARITY[c[0]] == null || c.length !== CMD_ARITY[c[0]]) {
+          throw new Error('bad path command');
+        }
+        for (let i = 1; i < c.length; i++) {
+          if (typeof c[i] !== 'number' || !isFinite(c[i])) throw new Error('bad path coordinate');
+        }
+      }
+      s.type = 'path';
+      if (!layerIds.has(s.layer)) s.layer = d.layers[0].id;
+      if (s.opacity == null || !isFinite(s.opacity)) s.opacity = 1;
+      if (s.fill != null && typeof s.fill !== 'string') s.fill = null;
+      if (s.stroke != null && (typeof s.stroke !== 'object' || typeof s.stroke.color !== 'string'
+        || !isFinite(s.stroke.w))) s.stroke = null;
+      const m = typeof s.id === 'string' && /^S(\d+)$/.exec(s.id);
+      if (m) maxId = Math.max(maxId, +m[1]); else s.id = null;
+    }
+    // groups: validate registry, heal dangling refs/parents and cycles
+    if (!Array.isArray(d.groups)) d.groups = [];
+    const gids = new Set();
+    for (const g of d.groups) {
+      const gm = g && typeof g.id === 'string' && /^G(\d+)$/.exec(g.id);
+      if (!gm) throw new Error('bad group');
+      gids.add(g.id);
+      maxId = Math.max(maxId, +gm[1]);
+    }
+    for (const g of d.groups) {
+      if (g.parent != null && !gids.has(g.parent)) g.parent = null;
+    }
+    for (const g of d.groups) { // break parent cycles
+      let cur = g, seen = new Set();
+      while (cur && cur.parent) {
+        if (seen.has(cur.id)) { g.parent = null; break; }
+        seen.add(cur.id);
+        cur = d.groups.find(x => x.id === cur.parent);
+      }
+    }
+    for (const s of d.shapes) {
+      if (s.group != null && !gids.has(s.group)) s.group = null;
+    }
+    let next = Math.max(isFinite(d.nextId) ? d.nextId : 1, maxId + 1);
+    for (const s of d.shapes) if (!s.id) s.id = 'S' + next++;
+    d.nextId = Math.max(next, maxId + 1);
+    return d;
+  }
+
+  // ---------- history (undo/redo) ----------
+  // Snapshot-based: the stack holds serialized docs, so entries are immutable
+  // and no-op commits are a cheap string compare. idx points at the current state.
+  function newHistory(doc, cap = 100) {
+    return { stack: [serializeDoc(doc)], idx: 0, cap };
+  }
+  function commit(h, doc) {
+    const s = serializeDoc(doc);
+    if (s === h.stack[h.idx]) return false;
+    h.stack = h.stack.slice(0, h.idx + 1);
+    h.stack.push(s);
+    while (h.stack.length > h.cap) h.stack.shift();
+    h.idx = h.stack.length - 1;
+    return true;
+  }
+  function canUndo(h) { return h.idx > 0; }
+  function canRedo(h) { return h.idx < h.stack.length - 1; }
+  function undo(h) { return canUndo(h) ? parseDoc(h.stack[--h.idx]) : null; }
+  function redo(h) { return canRedo(h) ? parseDoc(h.stack[++h.idx]) : null; }
+
+  // ---------- demo content (placeholder until real docs/import land) ----------
+  function demoDoc() {
+    const doc = newDoc({ w: 8.5, h: 11, units: 'in' });
+    addShape(doc, {
+      type: 'path', name: 'Rounded rect',
+      fill: '#2f6fb3', stroke: null, opacity: 1,
+      cmds: rectPath(1 * 72, 1 * 72, 3 * 72, 2 * 72, 18),
+    });
+    addShape(doc, {
+      type: 'path', name: 'Spot green circle',
+      fill: '#6cb33f', stroke: { color: '#1d1d1b', w: 1.5 }, opacity: 1,
+      cmds: ellipsePath(5.5 * 72, 3.4 * 72, 1.2 * 72, 1.2 * 72),
+    });
+    addShape(doc, {
+      type: 'path', name: 'Star',
+      fill: '#e8862e', stroke: null, opacity: 1,
+      cmds: starPath(3.4 * 72, 6.6 * 72, 1.5 * 72, 0.62 * 72, 5),
+    });
+    return doc;
+  }
+
+  return {
+    PT_PER, PX_PER_PT_100, KAPPA,
+    newDoc, addShape,
+    newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
+    rectPath, ellipsePath, starPath, pathBBox,
+    mMul, mTranslate, mScale, mRotate, mApply, transformCmds,
+    flattenPath, tightBBox, shapesBBox, hitTestShape, rectsIntersect,
+    rootGroupOf, expandIds, selectionUnits, groupShapes, ungroupShapes, duplicateShapes,
+    bringToFront, sendToBack, bringForward, sendBackward, alignUnits,
+    serializeDoc, parseDoc,
+    newHistory, commit, canUndo, canRedo, undo, redo,
+    demoDoc,
+  };
+})();
+if (typeof module !== 'undefined') module.exports = VECCORE;
+if (typeof window !== 'undefined') window.VECCORE = VECCORE;
+
+</script>
+<script>
+// studio_app — UI wiring for Aquamentor Vector Studio.
+// Thin layer over VECCORE: canvas rendering, pan/zoom, tool state, panels.
+(() => {
+  'use strict';
+  const C = window.VECCORE;
+  const $ = s => document.querySelector(s);
+
+  const stagewrap = $('#stagewrap');
+  const canvas = $('#stage');
+  const ctx = canvas.getContext('2d');
+
+  const TOOLS = {
+    select: 'Selection', direct: 'Direct Selection', pen: 'Pen',
+    rect: 'Rectangle', ellipse: 'Ellipse', hand: 'Hand', zoom: 'Zoom',
+  };
+  const TOOL_KEYS = { v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', h: 'hand', z: 'zoom' };
+
+  const AUTOSAVE_KEY = 'aqvec_autosave';
+
+  function loadAutosave() {
+    try {
+      const s = localStorage.getItem(AUTOSAVE_KEY);
+      return s ? C.parseDoc(s) : null;
+    } catch (e) { return null; }
+  }
+
+  const state = {
+    doc: loadAutosave() || C.demoDoc(),
+    history: null,       // set at boot
+    view: C.newView(),
+    tool: 'select',
+    space: false,        // spacebar temporary hand
+    pan: null,           // {sx,sy,view0} while dragging
+    drag: null,          // select-tool drag state machine
+    sel: new Set(),      // selected shape ids (always group-expanded)
+    autoFit: true,       // keep fitting on resize until the user changes the view
+  };
+  state.history = C.newHistory(state.doc);
+
+  // ---------- selection helpers ----------
+  function commitNow() {
+    if (C.commit(state.history, state.doc)) scheduleAutosave();
+  }
+  function setSel(ids) {
+    state.sel = new Set(C.expandIds(state.doc, ids));
+  }
+  function selShapes() {
+    return state.doc.shapes.filter(s => state.sel.has(s.id));
+  }
+  function selectableLayers() {
+    return new Set(state.doc.layers.filter(l => l.visible && !l.locked).map(l => l.id));
+  }
+  function worldPt(e) {
+    const r = canvas.getBoundingClientRect();
+    return C.s2w(state.view, e.clientX - r.left, e.clientY - r.top);
+  }
+  function screenPt(e) {
+    const r = canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  }
+  function hitAt(wx, wy) {
+    const ok = selectableLayers();
+    const tol = 3 / state.view.scale;
+    for (let i = state.doc.shapes.length - 1; i >= 0; i--) {
+      const s = state.doc.shapes[i];
+      if (!ok.has(s.layer)) continue;
+      if (C.hitTestShape(s, wx, wy, tol)) return s;
+    }
+    return null;
+  }
+
+  // bbox handle geometry (screen space)
+  const HANDLE_FRAC = { nw: [0, 0], n: [.5, 0], ne: [1, 0], e: [1, .5], se: [1, 1], s: [.5, 1], sw: [0, 1], w: [0, .5] };
+  const HANDLE_CURSOR = {
+    nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize',
+    n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+  };
+  function handlePoints(b) {
+    const v = state.view;
+    return Object.entries(HANDLE_FRAC).map(([c, f]) => {
+      const p = C.w2s(v, b.x + f[0] * b.w, b.y + f[1] * b.h);
+      return { c, x: p[0], y: p[1] };
+    });
+  }
+  function hitHandle(sx, sy) {
+    if (!state.sel.size) return null;
+    const b = C.shapesBBox(selShapes());
+    if (!b) return null;
+    const pts = handlePoints(b);
+    for (const h of pts) {
+      if (Math.abs(sx - h.x) <= 5 && Math.abs(sy - h.y) <= 5) return { type: 'scale', c: h.c, bbox: b };
+    }
+    for (const h of pts) {
+      if (h.c.length !== 2) continue; // corners only
+      const d = Math.hypot(sx - h.x, sy - h.y);
+      if (d > 5 && d <= 18) return { type: 'rotate', bbox: b };
+    }
+    return null;
+  }
+
+  function applyDragMatrix(m) {
+    const byId = new Map(state.doc.shapes.map(s => [s.id, s]));
+    for (const [id, cmds] of state.drag.orig) {
+      const s = byId.get(id);
+      if (s) s.cmds = C.transformCmds(cmds, m);
+    }
+  }
+  function snapshotSel() {
+    return new Map(selShapes().map(s => [s.id, JSON.parse(JSON.stringify(s.cmds))]));
+  }
+
+  // ---------- document lifecycle ----------
+  let autosaveTimer = 0;
+  function scheduleAutosave() {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => {
+      try { localStorage.setItem(AUTOSAVE_KEY, C.serializeDoc(state.doc)); } catch (e) { /* quota */ }
+    }, 400);
+  }
+
+  // Route every doc mutation through here: history + autosave + repaint.
+  function mutate(fn) {
+    fn(state.doc);
+    if (C.commit(state.history, state.doc)) scheduleAutosave();
+    renderLayers();
+    render();
+  }
+
+  function refreshDoc() {
+    // drop selection ids that no longer exist in the current doc
+    const alive = new Set(state.doc.shapes.map(s => s.id));
+    state.sel = new Set([...state.sel].filter(id => alive.has(id)));
+    renderLayers();
+    render();
+  }
+
+  function doUndo() {
+    const d = C.undo(state.history);
+    if (d) { state.doc = d; scheduleAutosave(); refreshDoc(); }
+  }
+  function doRedo() {
+    const d = C.redo(state.history);
+    if (d) { state.doc = d; scheduleAutosave(); refreshDoc(); }
+  }
+
+  // New/Open replace the doc and reset history.
+  function applyNewDoc(doc) {
+    state.doc = doc;
+    state.history = C.newHistory(doc);
+    state.sel.clear();
+    state.autoFit = true;
+    scheduleAutosave();
+    fitArtboard();
+    refreshDoc();
+  }
+
+  function newFile() {
+    if (state.doc.shapes.length && !window.confirm('Replace the current document with a new one?')) return;
+    applyNewDoc(C.newDoc());
+  }
+
+  function saveFile() {
+    const blob = new Blob([C.serializeDoc(state.doc)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (state.doc.name || 'Untitled') + '.aqv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.aqv,.json,application/json';
+  fileInput.addEventListener('change', () => {
+    const f = fileInput.files[0];
+    fileInput.value = '';
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      try {
+        const doc = C.parseDoc(rd.result);
+        doc.name = f.name.replace(/\.(aqv|json)$/i, '');
+        applyNewDoc(doc);
+      } catch (err) {
+        window.alert('Could not open "' + f.name + '": ' + err.message);
+      }
+    };
+    rd.readAsText(f);
+  });
+  function openFile() { fileInput.click(); }
+
+  // ---------- rendering ----------
+  let dpr = 1, vw = 0, vh = 0;
+
+  function resize() {
+    const r = stagewrap.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    vw = r.width; vh = r.height;
+    if (vw < 10 || vh < 10) return; // pane not laid out yet — wait for a real size
+    canvas.width = Math.round(vw * dpr);
+    canvas.height = Math.round(vh * dpr);
+    if (state.autoFit) fitArtboard();
+    render();
+  }
+
+  function fitArtboard() {
+    const ab = state.doc.artboard;
+    state.view = C.fitRect(vw, vh, 0, 0, ab.w, ab.h, 48);
+  }
+
+  function drawPath(cmds) {
+    ctx.beginPath();
+    for (const c of cmds) {
+      if (c[0] === 'M') ctx.moveTo(c[1], c[2]);
+      else if (c[0] === 'L') ctx.lineTo(c[1], c[2]);
+      else if (c[0] === 'C') ctx.bezierCurveTo(c[1], c[2], c[3], c[4], c[5], c[6]);
+      else if (c[0] === 'Z') ctx.closePath();
+    }
+  }
+
+  function render() {
+    const v = state.view, ab = state.doc.artboard;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--canvas') || '#1b1b1b';
+    ctx.fillRect(0, 0, vw, vh);
+
+    // artboard (screen space, so the shadow stays crisp at any zoom)
+    const [ax, ay] = C.w2s(v, 0, 0);
+    const aw = ab.w * v.scale, ah = ab.h * v.scale;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.55)';
+    ctx.shadowBlur = 18; ctx.shadowOffsetY = 4;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(ax, ay, aw, ah);
+    ctx.restore();
+
+    // shapes (world space; strokes are world-width so they scale with zoom)
+    ctx.save();
+    ctx.beginPath(); ctx.rect(ax, ay, aw, ah); ctx.clip(); // clip to artboard like Ai preview
+    ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.tx, dpr * v.ty);
+    const hidden = new Set(state.doc.layers.filter(l => !l.visible).map(l => l.id));
+    for (const s of state.doc.shapes) {
+      if (hidden.has(s.layer)) continue;
+      ctx.globalAlpha = s.opacity != null ? s.opacity : 1;
+      drawPath(s.cmds);
+      if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
+      if (s.stroke) { ctx.strokeStyle = s.stroke.color; ctx.lineWidth = s.stroke.w; ctx.stroke(); }
+    }
+    ctx.restore();
+
+    // artboard outline on top
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ax + .5, ay + .5, aw, ah);
+
+    drawSelectionOverlay();
+    updateReadouts();
+  }
+
+  function drawSelectionOverlay() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (state.sel.size) {
+      const b = C.shapesBBox(selShapes());
+      if (b) {
+        const p0 = C.w2s(state.view, b.x, b.y);
+        const p1 = C.w2s(state.view, b.x + b.w, b.y + b.h);
+        const units = C.selectionUnits(state.doc, [...state.sel]);
+        if (units.length > 1) {
+          ctx.strokeStyle = 'rgba(58,142,230,.45)';
+          ctx.lineWidth = 1;
+          for (const u of units) {
+            const q0 = C.w2s(state.view, u.bbox.x, u.bbox.y);
+            const q1 = C.w2s(state.view, u.bbox.x + u.bbox.w, u.bbox.y + u.bbox.h);
+            ctx.strokeRect(q0[0] + .5, q0[1] + .5, q1[0] - q0[0], q1[1] - q0[1]);
+          }
+        }
+        ctx.strokeStyle = '#3a8ee6';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(p0[0] + .5, p0[1] + .5, p1[0] - p0[0], p1[1] - p0[1]);
+        ctx.fillStyle = '#fff';
+        for (const h of handlePoints(b)) {
+          ctx.fillRect(h.x - 3.5, h.y - 3.5, 7, 7);
+          ctx.strokeRect(h.x - 3 + .5, h.y - 3 + .5, 6, 6);
+        }
+      }
+    }
+    const d = state.drag;
+    if (d && d.kind === 'marquee' && d.moved) {
+      ctx.strokeStyle = '#3a8ee6';
+      ctx.fillStyle = 'rgba(58,142,230,.08)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      const x = Math.min(d.m0[0], d.m1[0]), y = Math.min(d.m0[1], d.m1[1]);
+      const w = Math.abs(d.m1[0] - d.m0[0]), hh = Math.abs(d.m1[1] - d.m0[1]);
+      ctx.fillRect(x, y, w, hh);
+      ctx.strokeRect(x + .5, y + .5, w, hh);
+      ctx.setLineDash([]);
+    }
+  }
+
+  // ---------- panels / readouts ----------
+  function updateReadouts() {
+    const ab = state.doc.artboard, k = C.PT_PER[state.doc.units];
+    $('#p-name').textContent = state.doc.name || 'Untitled';
+    $('#p-artboard').textContent = `${+(ab.w / k).toFixed(2)} × ${+(ab.h / k).toFixed(2)} ${state.doc.units}`;
+    const z = Math.round(C.zoomPct(state.view)) + '%';
+    $('#p-zoom').textContent = z;
+    $('#s-zoom').textContent = z;
+    $('#p-tool').textContent = TOOLS[state.tool];
+    $('#s-tool').textContent = TOOLS[state.tool];
+    // selection readout + align button state
+    const selEl = $('#p-sel');
+    if (state.sel.size) {
+      const b = C.shapesBBox(selShapes());
+      selEl.textContent = b
+        ? `${state.sel.size} obj · ${+(b.w / k).toFixed(2)} × ${+(b.h / k).toFixed(2)} ${state.doc.units}`
+        : `${state.sel.size} obj`;
+    } else {
+      selEl.textContent = '—';
+    }
+    const units = selUnitCount();
+    document.querySelectorAll('.alignrow button[data-align]').forEach(btn => {
+      const dist = btn.dataset.align === 'hdist' || btn.dataset.align === 'vdist';
+      btn.disabled = dist ? units < 3 : units < 2;
+    });
+  }
+
+  function renderLayers() {
+    const ul = $('#layerlist');
+    ul.innerHTML = '';
+    for (const l of state.doc.layers) {
+      const li = document.createElement('li');
+      const eye = document.createElement('span');
+      eye.className = 'eye' + (l.visible ? ' on' : '');
+      eye.textContent = l.visible ? '◉' : '○';
+      eye.title = 'Toggle visibility';
+      eye.addEventListener('click', () => mutate(d => {
+        const dl = d.layers.find(x => x.id === l.id);
+        if (dl) dl.visible = !dl.visible;
+      }));
+      const name = document.createElement('span');
+      name.className = 'lname';
+      name.textContent = l.name;
+      li.append(eye, name);
+      ul.appendChild(li);
+    }
+  }
+
+  // ---------- menus ----------
+  const MENUS = {
+    file: [
+      { label: 'New', run: newFile },
+      { label: 'Open…', kbd: '⌘O', run: openFile },
+      { label: 'Save', kbd: '⌘S', run: saveFile },
+    ],
+    edit: [
+      { label: 'Undo', kbd: '⌘Z', run: doUndo, enabled: () => C.canUndo(state.history) },
+      { label: 'Redo', kbd: '⇧⌘Z', run: doRedo, enabled: () => C.canRedo(state.history) },
+      { label: 'Select All', kbd: '⌘A', run: () => selectAll(), enabled: () => state.doc.shapes.length > 0 },
+    ],
+    object: [
+      { label: 'Group', kbd: '⌘G', run: () => doGroup(), enabled: () => selUnitCount() >= 2 },
+      { label: 'Ungroup', kbd: '⇧⌘G', run: () => doUngroup(), enabled: () => selHasGroup() },
+      { label: 'Bring to Front', kbd: '⇧⌘]', run: () => doArrange('front'), enabled: () => state.sel.size > 0 },
+      { label: 'Bring Forward', kbd: '⌘]', run: () => doArrange('forward'), enabled: () => state.sel.size > 0 },
+      { label: 'Send Backward', kbd: '⌘[', run: () => doArrange('backward'), enabled: () => state.sel.size > 0 },
+      { label: 'Send to Back', kbd: '⇧⌘[', run: () => doArrange('back'), enabled: () => state.sel.size > 0 },
+    ],
+  };
+
+  // ---------- selection commands ----------
+  function selUnitCount() {
+    return state.sel.size ? C.selectionUnits(state.doc, [...state.sel]).length : 0;
+  }
+  function selHasGroup() {
+    return selShapes().some(s => s.group);
+  }
+  function selectAll() {
+    const ok = selectableLayers();
+    setSel(state.doc.shapes.filter(s => ok.has(s.layer)).map(s => s.id));
+    render();
+  }
+  function doGroup() {
+    if (selUnitCount() < 2) return;
+    mutate(d => C.groupShapes(d, [...state.sel]));
+  }
+  function doUngroup() {
+    if (!selHasGroup()) return;
+    mutate(d => {
+      const roots = new Set(
+        d.shapes.filter(s => state.sel.has(s.id)).map(s => C.rootGroupOf(d, s)).filter(Boolean));
+      roots.forEach(gid => C.ungroupShapes(d, gid));
+    });
+  }
+  function doArrange(how) {
+    if (!state.sel.size) return;
+    mutate(d => {
+      const ids = [...state.sel];
+      if (how === 'front') C.bringToFront(d, ids);
+      else if (how === 'forward') C.bringForward(d, ids);
+      else if (how === 'backward') C.sendBackward(d, ids);
+      else C.sendToBack(d, ids);
+    });
+  }
+  function doDelete() {
+    if (!state.sel.size) return;
+    mutate(d => { d.shapes = d.shapes.filter(s => !state.sel.has(s.id)); });
+    state.sel.clear();
+    render();
+  }
+  function nudge(dx, dy) {
+    if (!state.sel.size) return;
+    const m = C.mTranslate(dx, dy);
+    mutate(d => {
+      for (const s of d.shapes) if (state.sel.has(s.id)) s.cmds = C.transformCmds(s.cmds, m);
+    });
+  }
+
+  document.querySelectorAll('.alignrow button[data-align]').forEach(b =>
+    b.addEventListener('click', () => {
+      if (b.disabled) return;
+      mutate(d => C.alignUnits(d, [...state.sel], b.dataset.align));
+    }));
+
+  let openMenu = null; // {el, dd}
+  function closeMenu() {
+    if (!openMenu) return;
+    openMenu.el.classList.remove('open');
+    openMenu.dd.remove();
+    openMenu = null;
+  }
+  function showMenu(el) {
+    closeMenu();
+    const items = MENUS[el.dataset.menu];
+    if (!items) return;
+    const dd = document.createElement('div');
+    dd.className = 'dropdown';
+    for (const it of items) {
+      const div = document.createElement('div');
+      const on = !it.enabled || it.enabled();
+      div.className = 'item' + (on ? '' : ' disabled');
+      div.innerHTML = '<span></span><span class="kbd"></span>';
+      div.firstChild.textContent = it.label;
+      div.lastChild.textContent = it.kbd || '';
+      if (on) div.addEventListener('click', () => { closeMenu(); it.run(); });
+      dd.appendChild(div);
+    }
+    const r = el.getBoundingClientRect();
+    dd.style.left = r.left + 'px';
+    dd.style.top = r.bottom + 2 + 'px';
+    document.body.appendChild(dd);
+    el.classList.add('open');
+    openMenu = { el, dd };
+  }
+  document.querySelectorAll('#menubar .menu[data-menu]').forEach(el =>
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      openMenu && openMenu.el === el ? closeMenu() : showMenu(el);
+    }));
+  window.addEventListener('pointerdown', e => {
+    if (openMenu && !openMenu.dd.contains(e.target) && !openMenu.el.contains(e.target)) closeMenu();
+  });
+
+  // ---------- tools ----------
+  function setTool(t) {
+    if (!TOOLS[t]) return;
+    state.tool = t;
+    document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
+      b.classList.toggle('active', b.dataset.tool === t));
+    stagewrap.className = 'tool-' + t;
+    updateReadouts();
+  }
+
+  document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
+    b.addEventListener('click', () => setTool(b.dataset.tool)));
+
+  // ---------- pointer: pan / zoom-click ----------
+  function panActive(e) {
+    return state.tool === 'hand' || state.space || e.button === 1;
+  }
+
+  canvas.addEventListener('pointerdown', e => {
+    if (panActive(e)) {
+      state.autoFit = false;
+      state.pan = { sx: e.clientX, sy: e.clientY, view0: { ...state.view } };
+      stagewrap.classList.add('panning');
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    if (state.tool === 'zoom') {
+      state.autoFit = false;
+      const r = canvas.getBoundingClientRect();
+      const f = e.altKey ? 1 / 1.5 : 1.5;
+      state.view = C.zoomAt(state.view, e.clientX - r.left, e.clientY - r.top, f);
+      render();
+      return;
+    }
+    if (state.tool !== 'select' || e.button !== 0) return;
+
+    const [sx, sy] = screenPt(e);
+    const [wx, wy] = worldPt(e);
+    canvas.setPointerCapture(e.pointerId);
+
+    // 1) bbox handles beat shape hits
+    const h = hitHandle(sx, sy);
+    if (h) {
+      const b = h.bbox;
+      if (h.type === 'scale') {
+        const f = HANDLE_FRAC[h.c];
+        let ax = b.x + (1 - f[0]) * b.w, ay = b.y + (1 - f[1]) * b.h; // opposite point
+        if (e.altKey) { ax = b.x + b.w / 2; ay = b.y + b.h / 2; }
+        state.drag = {
+          kind: 'scale', c: h.c, ax, ay,
+          hx: b.x + f[0] * b.w, hy: b.y + f[1] * b.h,
+          axis: h.c === 'n' || h.c === 's' ? 'y' : h.c === 'e' || h.c === 'w' ? 'x' : 'xy',
+          orig: snapshotSel(), moved: false,
+        };
+      } else {
+        const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+        state.drag = {
+          kind: 'rotate', cx, cy,
+          a0: Math.atan2(wy - cy, wx - cx),
+          orig: snapshotSel(), moved: false,
+        };
+      }
+      return;
+    }
+
+    // 2) shape hit → select / toggle, arm move drag
+    const hit = hitAt(wx, wy);
+    if (hit) {
+      if (e.shiftKey) {
+        const unit = C.expandIds(state.doc, [hit.id]);
+        if (state.sel.has(hit.id)) {
+          unit.forEach(id => state.sel.delete(id));
+          render();
+          return; // deselected — no drag
+        }
+        unit.forEach(id => state.sel.add(id));
+      } else if (!state.sel.has(hit.id)) {
+        setSel([hit.id]);
+      }
+      state.drag = {
+        kind: 'move', wx0: wx, wy0: wy,
+        alt: e.altKey, dupDone: false,
+        orig: snapshotSel(), moved: false,
+      };
+      render();
+      return;
+    }
+
+    // 3) empty space → marquee
+    state.drag = { kind: 'marquee', m0: [sx, sy], m1: [sx, sy], shift: e.shiftKey, moved: false };
+  });
+
+  canvas.addEventListener('pointermove', e => {
+    if (state.pan) {
+      state.view = C.panBy(state.pan.view0, e.clientX - state.pan.sx, e.clientY - state.pan.sy);
+      render();
+    }
+    const [sx, sy] = screenPt(e);
+    const [wx, wy] = worldPt(e);
+    const d = state.drag;
+    if (d) {
+      if (d.kind === 'move') {
+        const dx = wx - d.wx0, dy = wy - d.wy0;
+        if (!d.moved && Math.hypot(dx, dy) * state.view.scale < 3) { /* click slack */ }
+        else {
+          if (d.alt && !d.dupDone) { // alt-drag: copy moves, original stays
+            const ids = C.duplicateShapes(state.doc, [...state.sel]);
+            setSel(ids);
+            d.orig = snapshotSel();
+            d.dupDone = true;
+          }
+          d.moved = true;
+          applyDragMatrix(C.mTranslate(dx, dy));
+          render();
+        }
+      } else if (d.kind === 'scale') {
+        let fx = 1, fy = 1;
+        const dx0 = d.hx - d.ax, dy0 = d.hy - d.ay;
+        if (d.axis !== 'y' && Math.abs(dx0) > 1e-9) fx = (wx - d.ax) / dx0;
+        if (d.axis !== 'x' && Math.abs(dy0) > 1e-9) fy = (wy - d.ay) / dy0;
+        if (e.shiftKey && d.axis === 'xy') fy = fx;
+        if (isFinite(fx) && isFinite(fy)) {
+          d.moved = true;
+          applyDragMatrix(C.mScale(fx, fy, d.ax, d.ay));
+          render();
+        }
+      } else if (d.kind === 'rotate') {
+        let da = Math.atan2(wy - d.cy, wx - d.cx) - d.a0;
+        if (e.shiftKey) da = Math.round(da / (Math.PI / 4)) * (Math.PI / 4);
+        d.moved = true;
+        applyDragMatrix(C.mRotate(da, d.cx, d.cy));
+        render();
+      } else if (d.kind === 'marquee') {
+        d.m1 = [sx, sy];
+        d.moved = true;
+        render();
+      }
+    } else if (state.tool === 'select' && !state.pan) {
+      const hh = hitHandle(sx, sy);
+      canvas.style.cursor = hh ? (hh.type === 'rotate' ? 'crosshair' : HANDLE_CURSOR[hh.c]) : '';
+    }
+    const k = C.PT_PER[state.doc.units];
+    $('#s-coords').textContent = `x: ${(wx / k).toFixed(2)} ${state.doc.units}   y: ${(wy / k).toFixed(2)} ${state.doc.units}`;
+  });
+
+  canvas.addEventListener('pointerup', e => {
+    if (state.pan) {
+      state.pan = null;
+      stagewrap.classList.remove('panning');
+      canvas.releasePointerCapture(e.pointerId);
+      return;
+    }
+    const d = state.drag;
+    if (!d) return;
+    state.drag = null;
+    if (d.kind === 'marquee') {
+      if (!d.moved) {
+        if (!d.shift) { state.sel.clear(); render(); }
+        return;
+      }
+      const v = state.view;
+      const [ax, ay] = C.s2w(v, Math.min(d.m0[0], d.m1[0]), Math.min(d.m0[1], d.m1[1]));
+      const [bx, by] = C.s2w(v, Math.max(d.m0[0], d.m1[0]), Math.max(d.m0[1], d.m1[1]));
+      const rect = { x: ax, y: ay, w: bx - ax, h: by - ay };
+      const ok = selectableLayers();
+      const ids = state.doc.shapes
+        .filter(s => ok.has(s.layer))
+        .filter(s => { const b = C.tightBBox(s.cmds); return b && C.rectsIntersect(b, rect); })
+        .map(s => s.id);
+      setSel(d.shift ? [...state.sel, ...ids] : ids);
+      render();
+    } else if (d.moved) {
+      commitNow();
+      render();
+    }
+  });
+
+  // wheel = zoom at cursor (trackpad pinch arrives as ctrl+wheel — same path)
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    state.autoFit = false;
+    const r = canvas.getBoundingClientRect();
+    const f = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
+    state.view = C.zoomAt(state.view, e.clientX - r.left, e.clientY - r.top, f);
+    render();
+  }, { passive: false });
+
+  // ---------- keyboard ----------
+  window.addEventListener('keydown', e => {
+    const mod = e.metaKey || e.ctrlKey;
+    const k = e.key.toLowerCase();
+    if (e.key === 'Escape') {
+      closeMenu();
+      if (state.sel.size) { state.sel.clear(); render(); }
+      return;
+    }
+    if (mod && (k === 'y' || (e.shiftKey && k === 'z'))) { doRedo(); e.preventDefault(); return; }
+    if (mod && k === 'z') { doUndo(); e.preventDefault(); return; }
+    if (mod && k === 's') { saveFile(); e.preventDefault(); return; }
+    if (mod && k === 'o') { openFile(); e.preventDefault(); return; }
+    if (mod && k === 'a') { selectAll(); e.preventDefault(); return; }
+    if (mod && k === 'g') { e.shiftKey ? doUngroup() : doGroup(); e.preventDefault(); return; }
+    if (mod && e.key === ']') { doArrange(e.shiftKey ? 'front' : 'forward'); e.preventDefault(); return; }
+    if (mod && e.key === '[') { doArrange(e.shiftKey ? 'back' : 'backward'); e.preventDefault(); return; }
+    if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) { doDelete(); e.preventDefault(); return; }
+    if (!mod && e.key.startsWith('Arrow') && state.sel.size) {
+      const step = e.shiftKey ? 10 : 1;
+      nudge(
+        e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0,
+        e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0);
+      e.preventDefault();
+      return;
+    }
+    if (e.code === 'Space' && !e.repeat) {
+      state.space = true;
+      stagewrap.classList.add('tool-hand');
+      e.preventDefault();
+      return;
+    }
+    if (mod && e.key === '0') { state.autoFit = true; fitArtboard(); render(); e.preventDefault(); return; }
+    if (mod && e.key === '1') {
+      state.autoFit = false;
+      state.view = C.zoomAt(state.view, vw / 2, vh / 2, C.PX_PER_PT_100 / state.view.scale);
+      render(); e.preventDefault(); return;
+    }
+    if (mod && (e.key === '=' || e.key === '+')) {
+      state.autoFit = false;
+      state.view = C.zoomAt(state.view, vw / 2, vh / 2, 1.25); render(); e.preventDefault(); return;
+    }
+    if (mod && e.key === '-') {
+      state.autoFit = false;
+      state.view = C.zoomAt(state.view, vw / 2, vh / 2, 1 / 1.25); render(); e.preventDefault(); return;
+    }
+    if (!mod && TOOL_KEYS[e.key.toLowerCase()]) setTool(TOOL_KEYS[e.key.toLowerCase()]);
+  });
+
+  window.addEventListener('keyup', e => {
+    if (e.code === 'Space') {
+      state.space = false;
+      if (state.tool !== 'hand') stagewrap.className = 'tool-' + state.tool;
+    }
+  });
+
+  $('#btn-fit').addEventListener('click', () => { state.autoFit = true; fitArtboard(); render(); });
+  $('#btn-100').addEventListener('click', () => {
+    state.autoFit = false;
+    state.view = C.zoomAt(state.view, vw / 2, vh / 2, C.PX_PER_PT_100 / state.view.scale);
+    render();
+  });
+
+  // ---------- boot ----------
+  window.addEventListener('resize', resize);
+  new ResizeObserver(resize).observe(stagewrap);
+  setTool('select');
+  renderLayers();
+  resize();
+
+  // debug handle
+  window.VEC_STUDIO = {
+    state, render, setTool, fitArtboard, VECCORE: C,
+    mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
+    setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
+  };
+})();
+
+</script>
+</body>
+</html>
