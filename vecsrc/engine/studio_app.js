@@ -34,14 +34,34 @@
     drag: null,          // select-tool drag state machine
     sel: new Set(),      // selected shape ids (always group-expanded)
     autoFit: true,       // keep fitting on resize until the user changes the view
+    target: 'fill',      // which paint the color picker and swatches drive
+    paint: null,         // {fill, stroke} current paints — null means "none"
+    pick: null,          // {fill, stroke} last real color per target, for the picker
+    colorModel: 'rgb',   // picker entry mode: rgb | cmyk | hsb
+    swatchSel: -1,       // selected swatch index in doc.swatches
   };
   state.history = C.newHistory(state.doc);
+  {
+    // Illustrator's startup paints: white fill over a black stroke.
+    const white = C.makeColor({ space: 'cmyk', values: [0, 0, 0, 0] });
+    const black = C.makeColor({ space: 'cmyk', values: [0, 0, 0, 1] });
+    state.paint = { fill: white, stroke: black };
+    state.pick = { fill: white, stroke: black };
+  }
 
   // ---------- selection helpers ----------
   function commitNow() {
     if (C.commit(state.history, state.doc)) scheduleAutosave();
   }
+  // A panel field fires its change event on blur, so anything about to move
+  // the selection has to let it commit first — otherwise a weight or opacity
+  // typed for one object lands on the next one.
+  function blurPanelField() {
+    const el = document.activeElement;
+    if (el && el.closest && el.closest('#panels')) el.blur();
+  }
   function setSel(ids) {
+    blurPanelField();
     state.sel = new Set(C.expandIds(state.doc, ids));
   }
   function selShapes() {
@@ -251,14 +271,55 @@
     state.view = C.fitRect(vw, vh, 0, 0, ab.w, ab.h, 48);
   }
 
-  function drawPath(cmds) {
-    ctx.beginPath();
+  function appendPath(cmds) {
     for (const c of cmds) {
       if (c[0] === 'M') ctx.moveTo(c[1], c[2]);
       else if (c[0] === 'L') ctx.lineTo(c[1], c[2]);
       else if (c[0] === 'C') ctx.bezierCurveTo(c[1], c[2], c[3], c[4], c[5], c[6]);
       else if (c[0] === 'Z') ctx.closePath();
     }
+  }
+
+  function drawPath(cmds) {
+    ctx.beginPath();
+    appendPath(cmds);
+  }
+
+  // Canvas only centers strokes, so inside/outside draw at double weight and
+  // clip to (or away from) the shape — the same construction the PDF exporter
+  // writes, so preview and print agree. Caps and joins render at that doubled
+  // size, which only shows on open or dashed paths; closed shapes, where
+  // alignment actually matters, are exact. The current path on entry is the
+  // shape's, left there by the fill pass.
+  function strokeShape(s) {
+    const st = s.stroke;
+    ctx.strokeStyle = st.color;
+    ctx.lineWidth = st.w;
+    ctx.lineCap = C.strokeProp(st, 'cap');
+    ctx.lineJoin = C.strokeProp(st, 'join');
+    ctx.miterLimit = C.strokeProp(st, 'miter');
+    ctx.setLineDash(st.dash || []);
+    const align = C.strokeProp(st, 'align');
+    if (align !== 'center') {
+      ctx.save();
+      ctx.lineWidth = st.w * 2;
+      if (align === 'inside') {
+        ctx.clip();
+      } else {
+        const b = C.tightBBox(s.cmds) || { x: 0, y: 0, w: 0, h: 0 };
+        const pad = st.w * 2 + 10;
+        ctx.beginPath();
+        ctx.rect(b.x - pad, b.y - pad, b.w + 2 * pad, b.h + 2 * pad);
+        appendPath(s.cmds); // even-odd against the enclosing rect = outside only
+        ctx.clip('evenodd');
+      }
+      drawPath(s.cmds);
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   function render() {
@@ -287,7 +348,7 @@
       ctx.globalAlpha = s.opacity != null ? s.opacity : 1;
       drawPath(s.cmds);
       if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
-      if (s.stroke) { ctx.strokeStyle = s.stroke.color; ctx.lineWidth = s.stroke.w; ctx.stroke(); }
+      if (s.stroke) strokeShape(s);
     }
     ctx.restore();
 
@@ -367,6 +428,9 @@
       const dist = btn.dataset.align === 'hdist' || btn.dataset.align === 'vdist';
       btn.disabled = dist ? units < 3 : units < 2;
     });
+    syncPaintPanel();
+    syncStrokePanel();
+    renderSwatches();
   }
 
   function renderLayers() {
@@ -389,6 +453,291 @@
       ul.appendChild(li);
     }
   }
+
+  // ---------- fill, stroke & color ----------
+  // The picker speaks the units people type: RGB 0-255, CMYK/HSB percentages,
+  // hue in degrees. Everything below the panel boundary is 0..1 (see veccore).
+  const COLOR_MODELS = {
+    rgb: [{ k: 'R', max: 255 }, { k: 'G', max: 255 }, { k: 'B', max: 255 }],
+    cmyk: [{ k: 'C', max: 100 }, { k: 'M', max: 100 }, { k: 'Y', max: 100 }, { k: 'K', max: 100 }],
+    hsb: [{ k: 'H', max: 360 }, { k: 'S', max: 100 }, { k: 'B', max: 100 }],
+  };
+
+  function colorToModel(col, model) {
+    const rgb = col ? col.rgb : [0, 0, 0];
+    if (model === 'cmyk') {
+      // a spot ink shows the build it actually prints as
+      const v = col && col.space === 'cmyk' ? col.values
+        : col && col.alt && col.alt.space === 'cmyk' ? col.alt.values
+          : C.rgbToCmyk(rgb);
+      return v.map(x => x * 100);
+    }
+    if (model === 'hsb') {
+      const h = C.rgbToHsb(rgb);
+      return [h[0], h[1] * 100, h[2] * 100];
+    }
+    return rgb.map(x => x * 255);
+  }
+
+  function modelToColor(vals, model) {
+    if (model === 'cmyk') return C.makeColor({ space: 'cmyk', values: vals.map(v => v / 100) });
+    const rgb = model === 'hsb'
+      ? C.hsbToRgb([vals[0], vals[1] / 100, vals[2] / 100])
+      : vals.map(v => v / 255);
+    return C.makeColor({ space: 'rgb', values: rgb });
+  }
+
+  // Effective paint of a target: the frontmost selected object's, or the app's
+  // current paint when nothing is selected.
+  function effectivePaint(kind) {
+    const shapes = selShapes();
+    if (!shapes.length) return state.paint[kind];
+    const s = shapes[shapes.length - 1];
+    if (kind === 'fill') return C.paintColor(s.fill, s.fillInfo);
+    return s.stroke ? C.paintColor(s.stroke.color, s.strokeInfo) : null;
+  }
+
+  // Paint the whole selection in one shot. live=true skips the history entry
+  // so dragging a slider ends up as a single undo step on release.
+  function pushColor(col, live) {
+    state.paint[state.target] = col;
+    if (col) state.pick[state.target] = col;
+    if (state.sel.size) {
+      const ids = [...state.sel];
+      if (state.target === 'fill') C.setFill(state.doc, ids, col);
+      else C.setStroke(state.doc, ids, col);
+      if (!live && C.commit(state.history, state.doc)) scheduleAutosave();
+    }
+    render();
+  }
+
+  function setTarget(t) {
+    state.target = t;
+    $('#well-fill').classList.toggle('active', t === 'fill');
+    $('#well-stroke').classList.toggle('active', t === 'stroke');
+    render();
+  }
+
+  function swapPaints() {
+    if (state.sel.size) mutate(d => C.swapFillStroke(d, [...state.sel]));
+    else {
+      const f = state.paint.fill;
+      state.paint.fill = state.paint.stroke;
+      state.paint.stroke = f;
+      render();
+    }
+  }
+
+  function defaultPaints() {
+    const white = C.makeColor({ space: 'cmyk', values: [0, 0, 0, 0] });
+    const black = C.makeColor({ space: 'cmyk', values: [0, 0, 0, 1] });
+    state.paint = { fill: white, stroke: black };
+    state.pick = { fill: white, stroke: black };
+    if (state.sel.size) {
+      mutate(d => {
+        const ids = [...state.sel];
+        C.setFill(d, ids, white);
+        C.setStroke(d, ids, black);
+        C.setStrokeProps(d, ids, { w: 1 });
+      });
+    } else render();
+  }
+
+  // Only write inputs the user is not currently in — otherwise a repaint mid
+  // drag or mid keystroke fights them for the caret.
+  function setVal(el, v) { if (el !== document.activeElement) el.value = v; }
+
+  const colSliders = $('#col-sliders');
+  let sliderModel = null;
+
+  function buildSliders() {
+    if (sliderModel === state.colorModel) return;
+    sliderModel = state.colorModel;
+    colSliders.innerHTML = '';
+    COLOR_MODELS[sliderModel].forEach((comp, i) => {
+      const row = document.createElement('div');
+      row.className = 'crow';
+      row.innerHTML = '<label></label><input type="range" min="0" step="1">' +
+        '<input class="num" type="number" min="0" step="1">';
+      const [label, range, num] = row.children;
+      label.textContent = comp.k;
+      range.max = comp.max;
+      num.max = comp.max;
+      const push = (v, live) => {
+        const vals = COLOR_MODELS[sliderModel].map((c, j) => +colSliders.children[j].children[1].value);
+        vals[i] = v;
+        pushColor(modelToColor(vals, sliderModel), live);
+      };
+      range.addEventListener('input', () => push(+range.value, true));
+      range.addEventListener('change', () => { if (C.commit(state.history, state.doc)) scheduleAutosave(); });
+      num.addEventListener('change', () => push(+num.value, false));
+      colSliders.appendChild(row);
+    });
+  }
+
+  function paintLabel(col) {
+    if (!col) return 'None';
+    return C.defaultSwatchName(col) + (col.space === 'separation' ? ' · spot' : '');
+  }
+
+  function syncPaintPanel() {
+    buildSliders();
+    for (const kind of ['fill', 'stroke']) {
+      const col = effectivePaint(kind);
+      state.paint[kind] = col;
+      if (col) state.pick[kind] = col;
+      const well = $('#well-' + kind);
+      well.classList.toggle('none', !col);
+      well.firstChild.style[kind === 'fill' ? 'background' : 'borderColor'] =
+        col ? C.colorHex(col) : (kind === 'fill' ? '#ffffff' : '#ffffff');
+    }
+    const col = state.pick[state.target];
+    setVal($('#col-hex'), C.colorHex(col));
+    setVal($('#col-model'), state.colorModel);
+    colorToModel(col, state.colorModel).forEach((v, i) => {
+      const row = colSliders.children[i];
+      if (!row) return;
+      setVal(row.children[1], Math.round(v));
+      setVal(row.children[2], Math.round(v));
+    });
+    $('#fs-ink').textContent =
+      (state.target === 'fill' ? 'Fill: ' : 'Stroke: ') + paintLabel(state.paint[state.target]);
+
+    const shapes = selShapes();
+    const alpha = shapes.length ? shapes[shapes.length - 1].opacity : 1;
+    const pct = Math.round((alpha == null ? 1 : alpha) * 100);
+    setVal($('#op-range'), pct);
+    setVal($('#op-num'), pct);
+    $('#op-range').disabled = $('#op-num').disabled = !shapes.length;
+  }
+
+  document.querySelectorAll('.fswells .well[data-paint]').forEach(b =>
+    b.addEventListener('click', () => setTarget(b.dataset.paint)));
+  $('#fs-swap').addEventListener('click', swapPaints);
+  $('#fs-default').addEventListener('click', defaultPaints);
+  $('#fs-none').addEventListener('click', () => pushColor(null, false));
+  $('#col-model').addEventListener('change', e => { state.colorModel = e.target.value; render(); });
+  $('#col-hex').addEventListener('change', e => {
+    const rgb = C.hexToRgb(e.target.value);
+    if (rgb) pushColor(C.makeColor({ space: 'rgb', values: rgb }), false);
+    else render(); // unparseable — put the real value back
+  });
+
+  // Opacity: preview while dragging, one history entry on release.
+  function pushOpacity(pct, live) {
+    if (!state.sel.size) return;
+    C.setOpacity(state.doc, [...state.sel], pct / 100);
+    if (!live && C.commit(state.history, state.doc)) scheduleAutosave();
+    render();
+  }
+  $('#op-range').addEventListener('input', e => pushOpacity(+e.target.value, true));
+  $('#op-range').addEventListener('change', () => {
+    if (C.commit(state.history, state.doc)) scheduleAutosave();
+  });
+  $('#op-num').addEventListener('change', e => pushOpacity(+e.target.value, false));
+
+  // ---------- stroke options ----------
+  function selStroke() {
+    const withStroke = selShapes().filter(s => s.stroke);
+    return withStroke.length ? withStroke[withStroke.length - 1].stroke : null;
+  }
+
+  function applyStroke(props) {
+    if (!state.sel.size) return;
+    mutate(d => C.setStrokeProps(d, [...state.sel], props));
+  }
+
+  const STROKE_SEGS = [
+    { sel: '#st-cap', attr: 'cap', prop: 'cap' },
+    { sel: '#st-join', attr: 'join', prop: 'join' },
+    { sel: '#st-align', attr: 'align2', prop: 'align' },
+  ];
+  for (const seg of STROKE_SEGS) {
+    document.querySelectorAll(seg.sel + ' button').forEach(b =>
+      b.addEventListener('click', () => applyStroke({ [seg.prop]: b.dataset[seg.attr] })));
+  }
+  $('#st-w').addEventListener('change', e => applyStroke({ w: +e.target.value }));
+  $('#st-miter').addEventListener('change', e => applyStroke({ miter: +e.target.value }));
+  $('#st-dash').addEventListener('change', e => applyStroke({ dash: e.target.value }));
+
+  function syncStrokePanel() {
+    const st = selStroke();
+    const on = !!st;
+    setVal($('#st-w'), C.strokeProp(st, 'w'));
+    setVal($('#st-miter'), C.strokeProp(st, 'miter'));
+    setVal($('#st-dash'), st && st.dash ? st.dash.join(' ') : '');
+    for (const el of [$('#st-w'), $('#st-miter'), $('#st-dash')]) el.disabled = !on;
+    for (const seg of STROKE_SEGS) {
+      const cur = C.strokeProp(st, seg.prop);
+      document.querySelectorAll(seg.sel + ' button').forEach(b => {
+        b.classList.toggle('on', on && b.dataset[seg.attr] === cur);
+        b.disabled = !on;
+      });
+    }
+  }
+
+  // ---------- swatches ----------
+  let swatchSig = null;
+
+  function applySwatch(i) {
+    const sw = (state.doc.swatches || [])[i];
+    if (!sw) return;
+    state.swatchSel = i;
+    pushColor(C.swatchColor(sw), false);
+  }
+
+  function renameSwatchAt(i) {
+    const sw = (state.doc.swatches || [])[i];
+    if (!sw) return;
+    const name = window.prompt('Swatch name', sw.name);
+    if (name != null && name.trim()) mutate(d => C.renameSwatch(d, i, name));
+  }
+
+  function renderSwatches() {
+    const list = state.doc.swatches || [];
+    if (state.swatchSel >= list.length) state.swatchSel = -1;
+    const sig = list.map(s => s.name + '|' + C.swatchKey(s)).join('\n') + '#' + state.swatchSel;
+    if (sig === swatchSig) return;
+    swatchSig = sig;
+    const grid = $('#swatchgrid');
+    grid.innerHTML = '';
+    const none = document.createElement('div');
+    none.className = 'swatch noneswatch';
+    none.title = 'None';
+    none.addEventListener('click', () => pushColor(null, false));
+    grid.appendChild(none);
+    list.forEach((sw, i) => {
+      const el = document.createElement('div');
+      el.className = 'swatch' + (sw.spot ? ' spot' : '') + (state.swatchSel === i ? ' sel' : '');
+      el.style.background = C.rgbToHex(sw.rgb);
+      el.title = sw.name + (sw.spot ? ' — spot ink' : '');
+      el.dataset.swatch = String(i);
+      el.addEventListener('click', () => applySwatch(i));
+      el.addEventListener('dblclick', () => renameSwatchAt(i));
+      grid.appendChild(el);
+    });
+    const sel = list[state.swatchSel];
+    $('#swatchname').textContent = sel ? sel.name + (sel.spot ? ' — spot ink' : '') : '—';
+    $('#sw-rename').disabled = $('#sw-delete').disabled = !sel;
+  }
+
+  $('#sw-new').addEventListener('click', addCurrentSwatch);
+  $('#fs-tosw').addEventListener('click', addCurrentSwatch);
+  function addCurrentSwatch() {
+    const col = state.pick[state.target];
+    if (!col) return;
+    mutate(d => C.addSwatch(d, col));
+    state.swatchSel = C.findSwatch(state.doc, col);
+    render();
+  }
+  $('#sw-rename').addEventListener('click', () => renameSwatchAt(state.swatchSel));
+  $('#sw-delete').addEventListener('click', () => {
+    const i = state.swatchSel;
+    if (i < 0) return;
+    mutate(d => C.removeSwatch(d, i));
+    state.swatchSel = -1;
+    render();
+  });
 
   // ---------- menus ----------
   const MENUS = {
@@ -525,6 +874,7 @@
   }
 
   canvas.addEventListener('pointerdown', e => {
+    blurPanelField();
     if (panActive(e)) {
       state.autoFit = false;
       state.pan = { sx: e.clientX, sy: e.clientY, view0: { ...state.view } };
@@ -698,6 +1048,10 @@
   window.addEventListener('keydown', e => {
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
+    // Panel fields own their keystrokes; only the app-level modifiers get through.
+    const inField = /^(INPUT|SELECT|TEXTAREA)$/.test(e.target && e.target.tagName);
+    if (inField && e.key === 'Escape') { e.target.blur(); return; }
+    if (inField && !mod) return;
     if (e.key === 'Escape') {
       closeMenu();
       if (state.sel.size) { state.sel.clear(); render(); }
@@ -721,6 +1075,12 @@
       e.preventDefault();
       return;
     }
+    if (!mod && k === 'x') {
+      if (e.shiftKey) swapPaints(); else setTarget(state.target === 'fill' ? 'stroke' : 'fill');
+      e.preventDefault();
+      return;
+    }
+    if (!mod && k === 'd' && !e.shiftKey) { defaultPaints(); e.preventDefault(); return; }
     if (e.code === 'Space' && !e.repeat) {
       state.space = true;
       stagewrap.classList.add('tool-hand');
@@ -771,5 +1131,7 @@
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
     openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
+    setTarget, pushColor, pushOpacity, swapPaints, defaultPaints,
+    applyStroke, applySwatch, addCurrentSwatch, renameSwatchAt,
   };
 })();

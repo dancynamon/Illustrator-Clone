@@ -20,6 +20,7 @@ const VECCORE = (() => {
       layers: [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }],
       shapes: [],
       groups: [],
+      swatches: defaultSwatches(),
       nextId: 1,
     };
   }
@@ -33,6 +34,129 @@ const VECCORE = (() => {
     if (shape.group === undefined) shape.group = null;
     doc.shapes.push(shape);
     return shape;
+  }
+
+  // ---------- color ----------
+  // Paints are stored the way the PDF bridge already stores them: a hex
+  // string for the on-screen preview (shape.fill / shape.stroke.color) plus,
+  // for print spaces only, the real ink data alongside it in shape.fillInfo /
+  // shape.strokeInfo — {space, values, name?, alt?}. Every conversion between
+  // spaces lives here so the panels, the swatches and the PDF exporter all
+  // agree on what a color is. Components are 0..1 throughout; HSB hue is the
+  // one exception and is in degrees.
+  const COLOR_SPACES = { rgb: 3, cmyk: 4, gray: 1, separation: 1 };
+  const PRINT_SPACES = { cmyk: 1, gray: 1, separation: 1 };
+
+  function clamp01(v) { return !isFinite(v) ? 0 : v < 0 ? 0 : v > 1 ? 1 : v; }
+
+  // Returns null (not black) on anything unparseable so callers can reject
+  // half-typed input instead of silently painting with it.
+  function hexToRgb(hex) {
+    let h = String(hex == null ? '' : hex).trim().replace(/^#/, '');
+    if (h.length === 3) h = h.replace(/./g, c => c + c);
+    if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+    const n = parseInt(h, 16);
+    return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  }
+
+  function rgbToHex(rgb) {
+    return '#' + rgb.map(v => Math.round(clamp01(v) * 255).toString(16).padStart(2, '0')).join('');
+  }
+
+  function cmykToRgb(v) {
+    const k = clamp01(v[3]);
+    return [clamp01(v[0]), clamp01(v[1]), clamp01(v[2])].map(c => (1 - c) * (1 - k));
+  }
+
+  // Naive separation (no profiles), matching the exporter's device CMYK:
+  // pull the common ink out as K. Round-trips cmykToRgb for K-only builds.
+  function rgbToCmyk(v) {
+    const r = clamp01(v[0]), g = clamp01(v[1]), b = clamp01(v[2]);
+    const k = 1 - Math.max(r, g, b);
+    if (k >= 1) return [0, 0, 0, 1];
+    return [(1 - r - k) / (1 - k), (1 - g - k) / (1 - k), (1 - b - k) / (1 - k), k];
+  }
+
+  // HSB (= HSV): hue in degrees 0..360, saturation and brightness 0..1.
+  function rgbToHsb(v) {
+    const r = clamp01(v[0]), g = clamp01(v[1]), b = clamp01(v[2]);
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d) {
+      if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60;
+    }
+    return [h, mx ? d / mx : 0, mx];
+  }
+
+  function hsbToRgb(v) {
+    const h = ((v[0] % 360) + 360) % 360, s = clamp01(v[1]), b = clamp01(v[2]);
+    const i = Math.floor(h / 60), f = h / 60 - i;
+    const p = b * (1 - s), q = b * (1 - s * f), t = b * (1 - s * (1 - f));
+    switch (i % 6) {
+      case 0: return [b, t, p];
+      case 1: return [q, b, p];
+      case 2: return [p, b, t];
+      case 3: return [p, q, b];
+      case 4: return [t, p, b];
+      default: return [b, p, q];
+    }
+  }
+
+  function spaceToRgb(space, values) {
+    if (space === 'cmyk') return cmykToRgb(values);
+    if (space === 'gray') { const g = clamp01(values[0]); return [g, g, g]; }
+    return [clamp01(values[0]), clamp01(values[1]), clamp01(values[2])];
+  }
+
+  // Normalize anything color-shaped (picker output, importer palette entry,
+  // swatch) into {space, values, rgb, name?, alt?}. null means "none".
+  function makeColor(o) {
+    if (!o || !COLOR_SPACES[o.space]) return null;
+    const space = o.space, n = COLOR_SPACES[space];
+    const values = [];
+    for (let i = 0; i < n; i++) values.push(clamp01(Array.isArray(o.values) ? o.values[i] : 0));
+    if (space !== 'separation') return { space, values, rgb: spaceToRgb(space, values) };
+    // A spot ink is one tint value; its look comes from the alternate build,
+    // which is what keeps the plate identifiable all the way through export.
+    const col = { space, values, rgb: null, name: String(o.name || 'Spot') };
+    const a = o.alt;
+    if (a && COLOR_SPACES[a.space] && a.space !== 'separation' && Array.isArray(a.values)) {
+      const an = COLOR_SPACES[a.space];
+      col.alt = { space: a.space, values: a.values.slice(0, an).map(clamp01) };
+    }
+    if (Array.isArray(o.rgb) && o.rgb.length === 3) col.rgb = o.rgb.map(clamp01);
+    else if (col.alt) col.rgb = spaceToRgb(col.alt.space, col.alt.values);
+    else { const g = 1 - values[0]; col.rgb = [g, g, g]; } // unknown ink: tint as darkness
+    return col;
+  }
+
+  function colorHex(col) { return col ? rgbToHex(col.rgb) : null; }
+
+  // The part of a color worth storing next to the hex preview. RGB is fully
+  // described by the hex already; print spaces are not.
+  function colorInfo(col) {
+    if (!col || !PRINT_SPACES[col.space]) return null;
+    const o = { space: col.space, values: col.values.slice() };
+    if (col.name) o.name = col.name;
+    if (col.alt) o.alt = { space: col.alt.space, values: col.alt.values.slice() };
+    return o;
+  }
+
+  // Inverse: rebuild a full color from a shape's stored hex + print info.
+  function paintColor(hex, info) {
+    if (hex == null) return null;
+    const rgb = hexToRgb(hex) || [0, 0, 0];
+    if (info && COLOR_SPACES[info.space]) return makeColor({ ...info, rgb });
+    return makeColor({ space: 'rgb', values: rgb });
+  }
+
+  function colorEquals(a, b) {
+    if (!a || !b) return a === b;
+    return a.space === b.space && (a.name || '') === (b.name || '') &&
+      a.values.length === b.values.length && a.values.every((v, i) => Math.abs(v - b.values[i]) < 1e-6);
   }
 
   // ---------- view (world pt <-> screen px) ----------
@@ -416,6 +540,164 @@ const VECCORE = (() => {
     }
   }
 
+  // ---------- fill, stroke & opacity ----------
+  // Each of these mutates the doc in place over a plain id list and leaves
+  // committing to the caller, so painting a whole selection is one undo step.
+  const STROKE_CAPS = { butt: 1, round: 1, square: 1 };
+  const STROKE_JOINS = { miter: 1, round: 1, bevel: 1 };
+  const STROKE_ALIGNS = { center: 1, inside: 1, outside: 1 };
+  const STROKE_DEFAULTS = { w: 1, cap: 'butt', join: 'miter', miter: 10, align: 'center' };
+
+  function eachShape(doc, ids, fn) {
+    const set = new Set(ids);
+    for (const s of doc.shapes) if (set.has(s.id)) fn(s);
+  }
+
+  // col === null paints "none".
+  function setFill(doc, ids, col) {
+    const hex = colorHex(col), info = colorInfo(col);
+    eachShape(doc, ids, s => {
+      s.fill = hex;
+      if (info) s.fillInfo = { ...info }; else delete s.fillInfo;
+    });
+  }
+
+  function setStroke(doc, ids, col) {
+    const hex = colorHex(col), info = colorInfo(col);
+    eachShape(doc, ids, s => {
+      if (hex == null) { s.stroke = null; delete s.strokeInfo; return; }
+      s.stroke = { ...(s.stroke || { w: STROKE_DEFAULTS.w }), color: hex };
+      if (info) s.strokeInfo = { ...info }; else delete s.strokeInfo;
+    });
+  }
+
+  // Weight/cap/join/miter/dash/align. Shapes with no stroke are skipped —
+  // a weight alone should never conjure a black outline out of nothing.
+  function setStrokeProps(doc, ids, props) {
+    eachShape(doc, ids, s => {
+      if (!s.stroke) return;
+      const st = { ...s.stroke };
+      if (props.w != null && isFinite(props.w)) st.w = Math.max(0, props.w);
+      if (STROKE_CAPS[props.cap]) st.cap = props.cap;
+      if (STROKE_JOINS[props.join]) st.join = props.join;
+      if (props.miter != null && isFinite(props.miter)) st.miter = Math.max(1, props.miter);
+      if (STROKE_ALIGNS[props.align]) st.align = props.align;
+      if (props.dash !== undefined) {
+        const d = parseDash(props.dash);
+        if (d) st.dash = d; else delete st.dash;
+      }
+      s.stroke = st;
+    });
+  }
+
+  function setOpacity(doc, ids, a) {
+    const v = clamp01(a);
+    eachShape(doc, ids, s => { s.opacity = v; });
+  }
+
+  // Shift+X: every shape trades its own fill for its own stroke color, so a
+  // mixed selection stays meaningful instead of collapsing to one pair.
+  function swapFillStroke(doc, ids) {
+    for (const s of doc.shapes.filter(s => ids.indexOf(s.id) >= 0)) {
+      const fill = paintColor(s.fill, s.fillInfo);
+      const stroke = s.stroke ? paintColor(s.stroke.color, s.strokeInfo) : null;
+      setFill(doc, [s.id], stroke);
+      setStroke(doc, [s.id], fill);
+    }
+  }
+
+  // "6 3" / [6,3] -> [6,3]; anything all-zero or empty means solid (null).
+  function parseDash(d) {
+    const list = (Array.isArray(d) ? d : String(d == null ? '' : d).trim().split(/[\s,]+/))
+      .map(Number).filter(v => isFinite(v) && v >= 0);
+    return list.length && list.some(v => v > 0) ? list : null;
+  }
+
+  function strokeProp(stroke, key) {
+    if (!stroke) return STROKE_DEFAULTS[key];
+    const v = stroke[key];
+    return v == null ? STROKE_DEFAULTS[key] : v;
+  }
+
+  // ---------- swatches ----------
+  // doc.swatches is the document palette. The PDF/.ai importer fills it from
+  // the inks it finds in the file; the Swatches panel edits it. A swatch is a
+  // color record plus a name, and spot inks (space 'separation') carry the ink
+  // name and its alternate build so plates survive a round trip.
+  function defaultSwatchName(col) {
+    if (col.space === 'separation') return col.name || 'Spot';
+    if (col.space === 'cmyk') {
+      return col.values.map((v, i) => 'CMYK'[i] + '=' + Math.round(v * 100)).join(' ');
+    }
+    if (col.space === 'gray') return 'Gray ' + Math.round(col.values[0] * 100);
+    return col.values.map((v, i) => 'RGB'[i] + '=' + Math.round(v * 255)).join(' ');
+  }
+
+  function makeSwatch(o) {
+    const col = makeColor(o);
+    if (!col) return null;
+    const sw = {
+      name: String((o && o.name) || defaultSwatchName(col)),
+      space: col.space, values: col.values, rgb: col.rgb,
+    };
+    if (col.alt) sw.alt = col.alt;
+    sw.spot = col.space === 'separation';
+    return sw;
+  }
+
+  // Identity for dedupe: same space and components, and for spots the same
+  // ink name — two different inks may well share an alternate build.
+  function swatchKey(sw) {
+    return sw.space + '|' + (sw.spot ? sw.name : '') + '|' + sw.values.map(v => v.toFixed(4)).join(',');
+  }
+
+  function findSwatch(doc, col) {
+    const sw = makeSwatch(col);
+    if (!sw) return -1;
+    const key = swatchKey(sw);
+    return (doc.swatches || []).findIndex(s => swatchKey(s) === key);
+  }
+
+  function addSwatch(doc, col, name) {
+    if (!Array.isArray(doc.swatches)) doc.swatches = [];
+    const sw = makeSwatch(name ? { ...col, name } : col);
+    if (!sw) return null;
+    const i = findSwatch(doc, sw);
+    if (i >= 0) return doc.swatches[i];
+    doc.swatches.push(sw);
+    return sw;
+  }
+
+  function removeSwatch(doc, i) {
+    if (!Array.isArray(doc.swatches) || i < 0 || i >= doc.swatches.length) return false;
+    doc.swatches.splice(i, 1);
+    return true;
+  }
+
+  function renameSwatch(doc, i, name) {
+    const sw = Array.isArray(doc.swatches) ? doc.swatches[i] : null;
+    if (!sw || !String(name || '').trim()) return false;
+    sw.name = String(name).trim();
+    return true;
+  }
+
+  function swatchColor(sw) { return makeColor(sw); }
+
+  // The palette a brand-new document starts with: Illustrator's process
+  // basics, as CMYK builds because this app exists for print work.
+  function defaultSwatches() {
+    return [
+      { name: 'White', space: 'cmyk', values: [0, 0, 0, 0] },
+      { name: 'Black', space: 'cmyk', values: [0, 0, 0, 1] },
+      { name: 'Cyan', space: 'cmyk', values: [1, 0, 0, 0] },
+      { name: 'Magenta', space: 'cmyk', values: [0, 1, 0, 0] },
+      { name: 'Yellow', space: 'cmyk', values: [0, 0, 1, 0] },
+      { name: 'Red', space: 'cmyk', values: [0, 1, 1, 0] },
+      { name: 'Green', space: 'cmyk', values: [0.75, 0, 1, 0] },
+      { name: 'Blue', space: 'cmyk', values: [1, 0.9, 0.1, 0] },
+    ].map(makeSwatch);
+  }
+
   // ---------- serialization (.aqv project format) ----------
   const APP_ID = 'aq-vector-studio';
   const FORMAT_VERSION = 1;
@@ -467,6 +749,12 @@ const VECCORE = (() => {
       if (s.fill != null && typeof s.fill !== 'string') s.fill = null;
       if (s.stroke != null && (typeof s.stroke !== 'object' || typeof s.stroke.color !== 'string'
         || !isFinite(s.stroke.w))) s.stroke = null;
+      if (s.stroke) healStroke(s.stroke);
+      for (const key of ['fillInfo', 'strokeInfo']) {
+        if (s[key] === undefined) continue;
+        const info = healColorInfo(s[key]);
+        if (info) s[key] = info; else delete s[key];
+      }
       const m = typeof s.id === 'string' && /^S(\d+)$/.exec(s.id);
       if (m) maxId = Math.max(maxId, +m[1]); else s.id = null;
     }
@@ -493,10 +781,45 @@ const VECCORE = (() => {
     for (const s of d.shapes) {
       if (s.group != null && !gids.has(s.group)) s.group = null;
     }
+    // palette: drop anything that isn't a usable color, normalize the rest
+    d.swatches = Array.isArray(d.swatches) ? d.swatches.map(makeSwatch).filter(Boolean) : [];
     let next = Math.max(isFinite(d.nextId) ? d.nextId : 1, maxId + 1);
     for (const s of d.shapes) if (!s.id) s.id = 'S' + next++;
     d.nextId = Math.max(next, maxId + 1);
     return d;
+  }
+
+  // Keep stroke extras only when they name something real; the renderer and
+  // the exporter fill in STROKE_DEFAULTS for whatever is absent.
+  function healStroke(st) {
+    st.w = Math.max(0, st.w);
+    if (!STROKE_CAPS[st.cap]) delete st.cap;
+    if (!STROKE_JOINS[st.join]) delete st.join;
+    if (!STROKE_ALIGNS[st.align]) delete st.align;
+    if (st.miter !== undefined && (!isFinite(st.miter) || st.miter < 1)) delete st.miter;
+    if (st.dash !== undefined) {
+      const d = parseDash(st.dash);
+      if (d) st.dash = d; else delete st.dash;
+    }
+  }
+
+  // Print-color data on a shape: keep it only if it is structurally sound,
+  // otherwise drop it and let the hex preview stand on its own.
+  function healColorInfo(info) {
+    if (!info || typeof info !== 'object' || !PRINT_SPACES[info.space]) return null;
+    const n = COLOR_SPACES[info.space];
+    if (!Array.isArray(info.values) || info.values.length < n) return null;
+    if (!info.values.slice(0, n).every(v => typeof v === 'number' && isFinite(v))) return null;
+    const o = { space: info.space, values: info.values.slice(0, n).map(clamp01) };
+    if (info.space === 'separation') o.name = String(info.name || 'Spot');
+    const a = info.alt;
+    if (a && COLOR_SPACES[a.space] && a.space !== 'separation' && Array.isArray(a.values)) {
+      const an = COLOR_SPACES[a.space];
+      if (a.values.length >= an && a.values.slice(0, an).every(v => typeof v === 'number' && isFinite(v))) {
+        o.alt = { space: a.space, values: a.values.slice(0, an).map(clamp01) };
+      }
+    }
+    return o;
   }
 
   // ---------- history (undo/redo) ----------
@@ -522,6 +845,12 @@ const VECCORE = (() => {
   // ---------- demo content (placeholder until real docs/import land) ----------
   function demoDoc() {
     const doc = newDoc({ w: 8.5, h: 11, units: 'in' });
+    // one spot ink in the palette so the Swatches panel shows a real plate
+    const spot = addSwatch(doc, {
+      space: 'separation', name: 'Aquamentor Green', values: [1],
+      alt: { space: 'cmyk', values: [0.4, 0, 0.65, 0.3] },
+    });
+    const spotCol = swatchColor(spot);
     addShape(doc, {
       type: 'path', name: 'Rounded rect',
       fill: '#2f6fb3', stroke: null, opacity: 1,
@@ -529,7 +858,8 @@ const VECCORE = (() => {
     });
     addShape(doc, {
       type: 'path', name: 'Spot green circle',
-      fill: '#6cb33f', stroke: { color: '#1d1d1b', w: 1.5 }, opacity: 1,
+      fill: colorHex(spotCol), fillInfo: colorInfo(spotCol),
+      stroke: { color: '#1d1d1b', w: 1.5 }, opacity: 1,
       cmds: ellipsePath(5.5 * 72, 3.4 * 72, 1.2 * 72, 1.2 * 72),
     });
     addShape(doc, {
@@ -542,7 +872,13 @@ const VECCORE = (() => {
 
   return {
     PT_PER, PX_PER_PT_100, KAPPA,
+    COLOR_SPACES, PRINT_SPACES, STROKE_CAPS, STROKE_JOINS, STROKE_ALIGNS, STROKE_DEFAULTS,
     newDoc, addShape,
+    clamp01, hexToRgb, rgbToHex, cmykToRgb, rgbToCmyk, rgbToHsb, hsbToRgb, spaceToRgb,
+    makeColor, colorHex, colorInfo, paintColor, colorEquals,
+    setFill, setStroke, setStrokeProps, setOpacity, swapFillStroke, parseDash, strokeProp,
+    makeSwatch, swatchKey, swatchColor, findSwatch, addSwatch, removeSwatch, renameSwatch,
+    defaultSwatches, defaultSwatchName,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
     rectPath, ellipsePath, starPath, pathBBox,
     mMul, mTranslate, mScale, mRotate, mApply, transformCmds,
