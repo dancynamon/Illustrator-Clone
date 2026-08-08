@@ -41,13 +41,17 @@ const PDFIO = (() => {
     if (!col || !PRINT_SPACES[col.space]) return null;
     const o = { space: col.space, values: col.values.slice() };
     if (col.name) o.name = col.name;
+    // a spot ink's alternate build — what the exporter needs to write a plate
+    if (col.alt) o.alt = { space: col.alt.space, values: col.alt.values.slice() };
     return o;
   }
 
   // veccore fill/stroke (+ optional info) -> VecPDF color
   function toExportColor(hex, info) {
     if (info && PRINT_SPACES[info.space] && Array.isArray(info.values)) {
-      return { space: info.space, values: info.values.slice(), rgb: hexToRgb(hex), name: info.name };
+      const col = { space: info.space, values: info.values.slice(), rgb: hexToRgb(hex), name: info.name };
+      if (info.alt) col.alt = { space: info.alt.space, values: info.alt.values.slice() };
+      return col;
     }
     const rgb = hexToRgb(hex);
     return { space: 'rgb', values: rgb, rgb };
@@ -123,15 +127,14 @@ const PDFIO = (() => {
     const doc = C.newDoc({ w: page.width / 72, h: page.height / 72, units: 'in' });
     doc.name = String(filename || 'Imported').replace(/\.(pdf|ai)$/i, '');
     for (const s of shapesFromPage(page)) C.addShape(doc, s);
-    doc.swatches = parsed.colors.map(c => ({
-      space: c.space, values: c.values, rgb: c.rgb, name: c.name || null, uses: c.uses,
-    }));
+    // The captured palette becomes the document's swatches, spot inks and all.
+    doc.swatches = parsed.colors.map(c => C.makeSwatch(c)).filter(Boolean);
     return { doc, pageCount: parsed.pageCount, isAI: parsed.isAI, colors: parsed.colors };
   }
 
   // ---------- export ----------
-  // Visible-layer shapes only, in z order. Opacity is not representable in
-  // the flat exporter and is dropped (shapes export fully opaque).
+  // Visible-layer shapes only, in z order, carrying stroke attributes and
+  // per-object opacity across to the writer.
   function exportShapes(doc) {
     const hidden = new Set((doc.layers || []).filter(l => !l.visible).map(l => l.id));
     const out = [];
@@ -140,13 +143,22 @@ const PDFIO = (() => {
       const subpaths = subpathsFromCmds(s.cmds);
       if (!subpaths.length) continue;
       if (s.fill == null && !s.stroke) continue;
-      out.push({
+      const shape = {
         subpaths,
         fill: s.fill != null ? toExportColor(s.fill, s.fillInfo) : null,
         stroke: s.stroke ? toExportColor(s.stroke.color, s.strokeInfo) : null,
         strokeWidth: s.stroke ? s.stroke.w : 0,
+        opacity: s.opacity == null ? 1 : s.opacity,
         fillRule: 'nonzero',
-      });
+      };
+      if (s.stroke) {
+        shape.strokeCap = C.strokeProp(s.stroke, 'cap');
+        shape.strokeJoin = C.strokeProp(s.stroke, 'join');
+        shape.strokeMiter = C.strokeProp(s.stroke, 'miter');
+        shape.strokeAlign = C.strokeProp(s.stroke, 'align');
+        if (s.stroke.dash) shape.strokeDash = s.stroke.dash.slice();
+      }
+      out.push(shape);
     }
     return out;
   }

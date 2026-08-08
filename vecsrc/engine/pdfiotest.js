@@ -183,6 +183,37 @@ function cmdBBox(cmds) { return C.tightBBox(cmds); }
     ok(cyan.fill.space === 'cmyk' && near(cyan.fill.values[0], 1), 'export: CMYK written natively');
   }
 
+  // ---- export: spot inks stay plates, not RGB ----
+  {
+    const a = await PDFIO.docFromPDF(spotPDF(), 'inks.pdf');
+    const bytes = PDFIO.exportDocPDF(a.doc);
+    const raw = Buffer.from(bytes).toString('latin1');
+    ok(/\/Separation \/PANTONE#20185#20C \/DeviceCMYK/.test(raw), 'spot export: written as a real Separation');
+    ok(/\/CS0 cs 1 scn/.test(raw), 'spot export: painted through the separation colorspace');
+    const b = await PDFIO.docFromPDF(bytes, 'inks2.pdf');
+    const spot = b.doc.shapes[1];
+    ok(spot.fillInfo.space === 'separation' && spot.fillInfo.name === 'PANTONE 185 C',
+      'spot export: still a named ink after the round trip');
+    ok(near(spot.fillInfo.alt.values[1], 0.91) && near(spot.fillInfo.alt.values[2], 0.76),
+      'spot export: alternate CMYK build preserved');
+    ok(b.doc.swatches.some(s => s.spot && s.name === 'PANTONE 185 C'), 'spot export: ink back in the palette');
+  }
+
+  // ---- export: stroke attributes and opacity ----
+  {
+    const doc = C.newDoc({ w: 4, h: 4, units: 'in' });
+    C.addShape(doc, {
+      type: 'path', fill: '#ffffff', opacity: 0.4,
+      stroke: { color: '#000000', w: 3, cap: 'round', join: 'bevel', miter: 4, dash: [6, 3], align: 'inside' },
+      cmds: C.rectPath(20, 20, 100, 100),
+    });
+    const raw = Buffer.from(PDFIO.exportDocPDF(doc)).toString('latin1');
+    ok(/\n1 J\n/.test(raw) && /\n2 j\n/.test(raw) && /\n4 M\n/.test(raw), 'stroke export: cap/join/miter operators');
+    ok(/\n\[6 3\] 0 d\n/.test(raw), 'stroke export: dash pattern');
+    ok(/\nW n\n/.test(raw) && /\n6 w\n/.test(raw), 'stroke export: inside align clips and doubles the weight');
+    ok(/\/ExtGState/.test(raw) && /\/ca 0\.4/.test(raw), 'stroke export: opacity as an ExtGState');
+  }
+
   // ---- full circle: PDF -> veccore doc -> PDF -> veccore doc ----
   {
     const a = await PDFIO.docFromPDF(spotPDF(), 'inks.pdf');

@@ -83,6 +83,164 @@ function near(a, b, eps = 1e-9) { return Math.abs(a - b) <= eps; }
   ok(d.shapes.every(s => Array.isArray(s.cmds) && s.cmds.length > 1), 'demoDoc shapes have cmds');
 }
 
+// ---- color conversion ----
+{
+  ok(C.rgbToHex([1, 0, 0]) === '#ff0000', 'rgbToHex');
+  ok(C.rgbToHex([0.5, 0.5, 0.5]) === '#808080', 'rgbToHex rounds');
+  const rt = C.hexToRgb('#3366cc');
+  ok(rt && near(rt[0], 0x33 / 255) && near(rt[2], 0xcc / 255), 'hexToRgb');
+  ok(C.rgbToHex(C.hexToRgb('#0af')) === '#00aaff', 'hexToRgb expands 3-digit');
+  ok(C.hexToRgb('nope') === null && C.hexToRgb('#12') === null, 'hexToRgb rejects garbage');
+  ok(C.clamp01(2) === 1 && C.clamp01(-1) === 0 && C.clamp01(NaN) === 0, 'clamp01');
+}
+{
+  ok(C.rgbToHex(C.cmykToRgb([1, 0, 0, 0])) === '#00ffff', 'cmyk cyan -> rgb');
+  ok(C.rgbToHex(C.cmykToRgb([0, 0, 0, 1])) === '#000000', 'cmyk K -> black');
+  ok(C.rgbToHex(C.cmykToRgb([0, 0, 0, 0])) === '#ffffff', 'cmyk empty -> white');
+  const back = C.cmykToRgb(C.rgbToCmyk([0.2, 0.4, 0.8]));
+  ok(near(back[0], 0.2) && near(back[1], 0.4) && near(back[2], 0.8), 'rgb -> cmyk -> rgb round trip');
+  ok(JSON.stringify(C.rgbToCmyk([0, 0, 0])) === '[0,0,0,1]', 'black separates to K alone');
+}
+{
+  const h = C.rgbToHsb([1, 0, 0]);
+  ok(near(h[0], 0) && near(h[1], 1) && near(h[2], 1), 'rgbToHsb red');
+  ok(near(C.rgbToHsb([0, 1, 0])[0], 120) && near(C.rgbToHsb([0, 0, 1])[0], 240), 'rgbToHsb hue wheel');
+  ok(C.rgbToHsb([0.3, 0.3, 0.3])[1] === 0, 'gray has no saturation');
+  for (const hex of ['#1188cc', '#ff8800', '#123456', '#ffffff', '#000000']) {
+    ok(C.rgbToHex(C.hsbToRgb(C.rgbToHsb(C.hexToRgb(hex)))) === hex, 'hsb round trip ' + hex);
+  }
+  ok(C.rgbToHex(C.hsbToRgb([-60, 1, 1])) === C.rgbToHex(C.hsbToRgb([300, 1, 1])), 'hsbToRgb wraps negative hue');
+}
+{
+  const cy = C.makeColor({ space: 'cmyk', values: [1, 0, 0, 0] });
+  ok(C.colorHex(cy) === '#00ffff', 'makeColor cmyk appearance');
+  ok(C.makeColor(null) === null && C.makeColor({ space: 'nope' }) === null, 'makeColor rejects non-colors');
+  ok(C.makeColor({ space: 'cmyk' }).values.length === 4, 'makeColor pads missing components');
+  const spot = C.makeColor({
+    space: 'separation', name: 'PANTONE 185 C', values: [1],
+    alt: { space: 'cmyk', values: [0, 0.91, 0.76, 0] },
+  });
+  ok(C.colorHex(spot) === C.rgbToHex(C.cmykToRgb([0, 0.91, 0.76, 0])), 'spot looks like its alternate build');
+  const info = C.colorInfo(spot);
+  ok(info.space === 'separation' && info.name === 'PANTONE 185 C' && info.alt.space === 'cmyk',
+    'colorInfo keeps the ink name and its build');
+  ok(C.colorInfo(C.makeColor({ space: 'rgb', values: [1, 0, 0] })) === null, 'rgb needs no print info');
+  const back = C.paintColor(C.colorHex(spot), info);
+  ok(C.colorEquals(back, spot) && back.name === spot.name, 'paintColor rebuilds a spot from hex + info');
+  ok(!C.colorEquals(cy, C.makeColor({ space: 'cmyk', values: [1, 0, 0, 0.5] })), 'colorEquals separates builds');
+  ok(C.paintColor(null, null) === null, 'paintColor of no paint is none');
+  ok(near(C.makeColor({ space: 'separation', name: 'Mystery', values: [0.5] }).rgb[0], 0.5),
+    'ink with no build falls back to tint as darkness');
+}
+
+// ---- fill / stroke / opacity ----
+{
+  const d = C.newDoc();
+  const A = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const B = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  const ids = [A.id, B.id];
+  C.setFill(d, ids, C.makeColor({ space: 'cmyk', values: [1, 0, 0, 0] }));
+  ok(A.fill === '#00ffff' && B.fill === '#00ffff', 'setFill paints the whole list');
+  ok(A.fillInfo.space === 'cmyk' && A.fillInfo !== B.fillInfo, 'setFill gives each shape its own info');
+  C.setFill(d, ids, C.makeColor({ space: 'rgb', values: [1, 0, 0] }));
+  ok(A.fill === '#ff0000' && A.fillInfo === undefined, 'an rgb fill drops stale print info');
+  C.setFill(d, [A.id], null);
+  ok(A.fill === null && B.fill === '#ff0000', 'fill none only where asked');
+}
+{
+  const d = C.newDoc();
+  const A = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  C.setStrokeProps(d, [A.id], { w: 4 });
+  ok(A.stroke === null, 'stroke options skip shapes with no stroke');
+  C.setStroke(d, [A.id], C.makeColor({ space: 'gray', values: [0] }));
+  ok(A.stroke.color === '#000000' && A.stroke.w === 1 && A.strokeInfo.space === 'gray',
+    'setStroke starts at 1pt and keeps gray');
+  C.setStrokeProps(d, [A.id], { w: 4, cap: 'round', join: 'bevel', miter: 2, align: 'inside', dash: '6 3' });
+  ok(A.stroke.w === 4 && A.stroke.cap === 'round' && A.stroke.join === 'bevel', 'weight/cap/join applied');
+  ok(A.stroke.miter === 2 && A.stroke.align === 'inside', 'miter limit + alignment applied');
+  ok(JSON.stringify(A.stroke.dash) === '[6,3]', 'dash parsed from typed text');
+  C.setStrokeProps(d, [A.id], { cap: 'wobble', dash: '0 0' });
+  ok(A.stroke.cap === 'round' && A.stroke.dash === undefined, 'unknown cap ignored, all-zero dash is solid');
+  ok(C.strokeProp(null, 'cap') === 'butt' && C.strokeProp({ w: 1 }, 'align') === 'center', 'strokeProp defaults');
+  C.setStroke(d, [A.id], null);
+  ok(A.stroke === null && A.strokeInfo === undefined, 'stroke none clears the print info too');
+}
+{
+  const d = C.newDoc();
+  const A = C.addShape(d, {
+    type: 'path', fill: '#ff0000', stroke: { color: '#0000ff', w: 2 }, cmds: C.rectPath(0, 0, 10, 10),
+  });
+  C.swapFillStroke(d, [A.id]);
+  ok(A.fill === '#0000ff' && A.stroke.color === '#ff0000' && A.stroke.w === 2,
+    'swapFillStroke trades colors and keeps the weight');
+  C.setOpacity(d, [A.id], 2);
+  ok(A.opacity === 1, 'setOpacity clamps');
+  C.setOpacity(d, [A.id], 0.35);
+  ok(near(A.opacity, 0.35), 'setOpacity applies');
+}
+{
+  // a whole-selection recolor is one history entry
+  const d = C.newDoc();
+  const ids = [0, 1, 2].map(i => C.addShape(d, { type: 'path', cmds: C.rectPath(i * 20, 0, 10, 10) }).id);
+  const h = C.newHistory(d);
+  C.setFill(d, ids, C.makeColor({ space: 'cmyk', values: [0, 1, 1, 0] }));
+  C.setOpacity(d, ids, 0.5);
+  ok(C.commit(h, d) === true && h.stack.length === 2, 'multi-object paint commits once');
+  const back = C.undo(h);
+  ok(back.shapes.every(s => s.fill == null && s.opacity === 1), 'one undo reverts the whole selection');
+}
+
+// ---- swatches ----
+{
+  const d = C.newDoc();
+  ok(d.swatches.length === 8 && d.swatches.every(s => !s.spot), 'newDoc seeds a process palette');
+  const spot = C.addSwatch(d, {
+    space: 'separation', name: 'PANTONE 185 C', values: [1],
+    alt: { space: 'cmyk', values: [0, 0.91, 0.76, 0] },
+  });
+  ok(spot.spot === true && d.swatches.length === 9, 'addSwatch appends a spot ink');
+  ok(C.addSwatch(d, spot) === spot && d.swatches.length === 9, 'addSwatch dedupes');
+  ok(C.findSwatch(d, C.makeColor({ space: 'cmyk', values: [0, 0, 0, 1] })) === 1, 'findSwatch by color');
+  ok(C.findSwatch(d, C.makeColor({ space: 'cmyk', values: [0.5, 0.5, 0.5, 0.5] })) === -1, 'findSwatch misses');
+  ok(C.colorEquals(C.swatchColor(spot), C.makeColor(spot)), 'swatchColor gives back a paintable color');
+  ok(C.renameSwatch(d, 8, '  Reflex  ') && d.swatches[8].name === 'Reflex', 'renameSwatch trims');
+  ok(!C.renameSwatch(d, 8, '   '), 'renameSwatch rejects a blank name');
+  ok(C.removeSwatch(d, 8) && d.swatches.length === 8, 'removeSwatch');
+  ok(!C.removeSwatch(d, 99), 'removeSwatch out of range');
+  ok(C.makeSwatch({ space: 'cmyk', values: [0.4, 0, 0.65, 0.3] }).name === 'C=40 M=0 Y=65 K=30',
+    'an unnamed swatch is named after its build');
+  ok(C.makeSwatch({ space: 'rgb', values: [1, 0, 0] }).name === 'R=255 G=0 B=0', 'rgb swatch name');
+  ok(C.makeSwatch(null) === null, 'makeSwatch rejects nothing');
+}
+{
+  // swatches and print info survive the project format
+  const d = C.demoDoc();
+  const d2 = C.parseDoc(C.serializeDoc(d));
+  const sw = d2.swatches.find(s => s.spot);
+  ok(sw && sw.name === 'Aquamentor Green' && sw.alt.space === 'cmyk', 'spot swatch round-trips');
+  ok(d2.shapes[1].fillInfo.space === 'separation' && near(d2.shapes[1].fillInfo.alt.values[2], 0.65),
+    'spot fill info round-trips with its build');
+}
+{
+  const wrap = doc => JSON.stringify({ app: 'aq-vector-studio', version: 1, doc });
+  const h = C.parseDoc(wrap({
+    artboard: { w: 612, h: 792 }, layers: [{ id: 'L1' }],
+    swatches: [{ space: 'cmyk', values: [0, 0, 0, 1], name: 'K' }, { space: 'bogus', values: [] }, null],
+    shapes: [{
+      layer: 'L1', cmds: [['M', 0, 0], ['L', 1, 1], ['Z']], fill: '#ff0000',
+      fillInfo: { space: 'cmyk', values: [1, 2] },
+      stroke: { color: '#000000', w: -3, cap: 'wobble', miter: 0, dash: ['x'] },
+    }],
+  }));
+  ok(h.swatches.length === 1 && h.swatches[0].name === 'K', 'parseDoc drops unusable swatches');
+  ok(h.shapes[0].fillInfo === undefined, 'parseDoc drops a short CMYK build');
+  ok(h.shapes[0].stroke.w === 0 && h.shapes[0].stroke.cap === undefined &&
+    h.shapes[0].stroke.miter === undefined && h.shapes[0].stroke.dash === undefined,
+    'parseDoc heals stroke extras');
+  const g = C.parseDoc(wrap({ artboard: { w: 10, h: 10 }, layers: [{ id: 'L1' }], shapes: [] }));
+  ok(Array.isArray(g.swatches) && g.swatches.length === 0, 'parseDoc gives a doc with no palette an empty one');
+}
+
 function throws(fn, name) {
   try { fn(); fail++; console.error('FAIL (no throw):', name); }
   catch (e) { pass++; }

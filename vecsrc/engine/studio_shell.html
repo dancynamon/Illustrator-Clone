@@ -23,7 +23,7 @@
     background: var(--bg); color: var(--text);
     display: grid;
     grid-template-rows: 28px 1fr 22px;
-    grid-template-columns: 40px 1fr 240px;
+    grid-template-columns: 40px 1fr 264px;
     grid-template-areas:
       "menu menu menu"
       "tools stage panels"
@@ -105,6 +105,83 @@
     background: #3a3a3b; color: var(--text); cursor: pointer; font-size: 11px;
   }
   .pbtns button:hover { background: #454546; }
+
+  /* form controls shared by the fill/stroke, stroke and swatch panels */
+  .panel input, .panel select {
+    background: #232324; color: var(--text); border: 1px solid #4a4a4a; border-radius: 3px;
+    padding: 2px 4px; font: inherit;
+  }
+  .panel input.num { width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
+  .panel input#col-hex { width: 66px; }
+  .panel input.txt { width: 92px; }
+  .panel input[type="range"] {
+    padding: 0; border: 0; background: none; accent-color: var(--accent);
+    height: 14px; vertical-align: middle;
+  }
+  .panel input:disabled, .panel select:disabled, .panel button:disabled { opacity: .4; cursor: default; }
+
+  /* segmented option rows (cap / join / stroke alignment) */
+  .segrow { display: flex; gap: 3px; }
+  .segrow button {
+    width: 26px; height: 22px; padding: 0; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .segrow button:hover:not([disabled]) { background: #454546; color: #fff; }
+  .segrow button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .segrow svg { width: 16px; height: 16px; }
+
+  /* fill & stroke indicator — overlapping wells, Illustrator style */
+  .fsrow { display: flex; gap: 10px; align-items: flex-start; }
+  .fswells { position: relative; width: 62px; height: 62px; flex: none; }
+  .fswells .well {
+    position: absolute; width: 34px; height: 34px; padding: 0; overflow: visible;
+    border: 1px solid #6a6a6a; border-radius: 0; background: #fff; cursor: pointer;
+  }
+  .fswells .well.fill { left: 0; top: 0; }
+  .fswells .well.stroke { left: 20px; top: 20px; }
+  .fswells .well.active { border-color: #fff; box-shadow: 0 0 0 1px #171717; z-index: 2; }
+  .fswells .well i { display: block; width: 100%; height: 100%; box-sizing: border-box; }
+  .fswells .well.stroke i { border: 7px solid #000; }
+  .fswells .well.none::after {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(to top right, transparent calc(50% - 1px),
+      #e03a3a calc(50% - 1px), #e03a3a calc(50% + 1px), transparent calc(50% + 1px));
+  }
+  .fswells .fsmini {
+    position: absolute; width: 15px; height: 15px; padding: 0; z-index: 3;
+    border: 1px solid #4a4a4a; border-radius: 2px; background: #3a3a3b;
+    color: var(--text); cursor: pointer; font-size: 9px; line-height: 1;
+  }
+  .fswells .fsmini:hover { background: #454546; }
+  #fs-swap { right: 0; top: 0; }
+  #fs-default { left: 0; bottom: 0; }
+  .fscol { flex: 1; min-width: 0; }
+  .fscol .pbtns { margin-top: 0; }
+  #fs-ink { color: var(--text-dim); padding: 3px 0 0; min-height: 16px; }
+
+  /* color picker rows */
+  .crow { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+  .crow label { width: 12px; color: var(--text-dim); }
+  .crow input[type="range"] { flex: 1; min-width: 0; }
+  .crow input.num { width: 46px; }
+
+  /* swatches */
+  #swatchgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-bottom: 6px; }
+  #swatchgrid .swatch {
+    position: relative; height: 22px; border: 1px solid #55555a; cursor: pointer; background: #fff;
+  }
+  #swatchgrid .swatch.sel { border-color: #fff; box-shadow: 0 0 0 1px var(--accent); }
+  #swatchgrid .swatch.noneswatch {
+    background: linear-gradient(to top right, transparent calc(50% - 1px),
+      #e03a3a calc(50% - 1px), #e03a3a calc(50% + 1px), transparent calc(50% + 1px)), #fff;
+  }
+  /* spot/Separation inks carry a corner dot the way Illustrator marks them */
+  #swatchgrid .swatch.spot::after {
+    content: ''; position: absolute; right: 1px; bottom: 1px; width: 5px; height: 5px;
+    border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.65);
+  }
+  #swatchname { color: var(--text-dim); padding-bottom: 4px; min-height: 16px; }
 
   /* align panel */
   .alignrow { display: flex; gap: 4px; margin-bottom: 4px; }
@@ -310,6 +387,104 @@
           </span>
           <input id="t-shear" type="text" autocomplete="off">
         </label>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Fill &amp; Stroke</h2>
+    <div class="body">
+      <div class="fsrow">
+        <div class="fswells">
+          <button class="well fill active" id="well-fill" data-paint="fill" title="Fill — X targets the other"><i></i></button>
+          <button class="well stroke" id="well-stroke" data-paint="stroke" title="Stroke — X targets the other"><i></i></button>
+          <button class="fsmini" id="fs-swap" title="Swap fill and stroke (Shift+X)">⇄</button>
+          <button class="fsmini" id="fs-default" title="Default fill and stroke (D)">◱</button>
+        </div>
+        <div class="fscol">
+          <div class="pbtns">
+            <button id="fs-none" title="Paint the target None">None</button>
+            <button id="fs-tosw" title="Add the current color to Swatches">+ Swatch</button>
+          </div>
+          <div class="prow"><span class="k">Hex</span><input class="num" id="col-hex" type="text" maxlength="7" spellcheck="false"></div>
+          <div class="prow"><span class="k">Model</span>
+            <select id="col-model">
+              <option value="rgb">RGB</option>
+              <option value="cmyk">CMYK</option>
+              <option value="hsb">HSB</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div id="col-sliders"></div>
+      <div id="fs-ink">—</div>
+      <div class="prow"><span class="k">Opacity</span><span class="v">
+        <input id="op-range" type="range" min="0" max="100" step="1" value="100">
+        <input class="num" id="op-num" type="number" min="0" max="100" step="1" value="100">
+      </span></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Stroke</h2>
+    <div class="body">
+      <div class="prow"><span class="k">Weight</span><span class="v">
+        <input class="num" id="st-w" type="number" min="0" step="0.25"> pt
+      </span></div>
+      <div class="prow"><span class="k">Cap</span>
+        <span class="segrow" id="st-cap">
+          <button data-cap="butt" title="Butt cap">
+            <svg viewBox="0 0 16 16"><path d="M3 8 H11" stroke="currentColor" stroke-width="6" stroke-linecap="butt" fill="none"/><path d="M11 2.5 V13.5" stroke="rgba(0,0,0,.6)" stroke-width="1"/></svg>
+          </button>
+          <button data-cap="round" title="Round cap">
+            <svg viewBox="0 0 16 16"><path d="M3 8 H11" stroke="currentColor" stroke-width="6" stroke-linecap="round" fill="none"/><path d="M11 2.5 V13.5" stroke="rgba(0,0,0,.6)" stroke-width="1"/></svg>
+          </button>
+          <button data-cap="square" title="Projecting cap">
+            <svg viewBox="0 0 16 16"><path d="M3 8 H11" stroke="currentColor" stroke-width="6" stroke-linecap="square" fill="none"/><path d="M11 2.5 V13.5" stroke="rgba(0,0,0,.6)" stroke-width="1"/></svg>
+          </button>
+        </span>
+      </div>
+      <div class="prow"><span class="k">Join</span>
+        <span class="segrow" id="st-join">
+          <button data-join="miter" title="Miter join">
+            <svg viewBox="0 0 16 16"><path d="M4 13 V5 H12" stroke="currentColor" stroke-width="5" stroke-linejoin="miter" fill="none"/></svg>
+          </button>
+          <button data-join="round" title="Round join">
+            <svg viewBox="0 0 16 16"><path d="M4 13 V5 H12" stroke="currentColor" stroke-width="5" stroke-linejoin="round" fill="none"/></svg>
+          </button>
+          <button data-join="bevel" title="Bevel join">
+            <svg viewBox="0 0 16 16"><path d="M4 13 V5 H12" stroke="currentColor" stroke-width="5" stroke-linejoin="bevel" fill="none"/></svg>
+          </button>
+        </span>
+      </div>
+      <div class="prow"><span class="k">Miter limit</span><span class="v">
+        <input class="num" id="st-miter" type="number" min="1" step="1">
+      </span></div>
+      <div class="prow"><span class="k">Align</span>
+        <span class="segrow" id="st-align">
+          <button data-align2="center" title="Align stroke to center">
+            <svg viewBox="0 0 16 16"><rect x="2" y="3" width="6" height="10" fill="currentColor" opacity=".25"/><path d="M8 3 V13" stroke="currentColor" stroke-width="4" opacity=".8"/><path d="M8 2 V14" stroke="rgba(0,0,0,.6)" stroke-width="1"/></svg>
+          </button>
+          <button data-align2="inside" title="Align stroke to inside">
+            <svg viewBox="0 0 16 16"><rect x="2" y="3" width="6" height="10" fill="currentColor" opacity=".25"/><path d="M6 3 V13" stroke="currentColor" stroke-width="4" opacity=".8"/><path d="M8 2 V14" stroke="rgba(0,0,0,.6)" stroke-width="1"/></svg>
+          </button>
+          <button data-align2="outside" title="Align stroke to outside">
+            <svg viewBox="0 0 16 16"><rect x="2" y="3" width="6" height="10" fill="currentColor" opacity=".25"/><path d="M10 3 V13" stroke="currentColor" stroke-width="4" opacity=".8"/><path d="M8 2 V14" stroke="rgba(0,0,0,.6)" stroke-width="1"/></svg>
+          </button>
+        </span>
+      </div>
+      <div class="prow"><span class="k">Dash</span><span class="v">
+        <input class="txt" id="st-dash" type="text" placeholder="solid — e.g. 6 3" spellcheck="false">
+      </span></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Swatches</h2>
+    <div class="body">
+      <div id="swatchgrid"></div>
+      <div id="swatchname">—</div>
+      <div class="pbtns">
+        <button id="sw-new" title="Add the current color as a swatch">New</button>
+        <button id="sw-rename" title="Rename the selected swatch">Rename</button>
+        <button id="sw-delete" title="Delete the selected swatch">Delete</button>
       </div>
     </div>
   </div>
