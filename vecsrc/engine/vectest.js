@@ -346,5 +346,278 @@ function throws(fn, name) {
   ok(h.nextId >= 8, 'parseDoc nextId accounts for group ids');
 }
 
+// ---- units ----
+{
+  ok(near(C.toPt(1, 'in'), 72) && near(C.fromPt(144, 'in'), 2), 'toPt/fromPt inches');
+  ok(near(C.toPt(25.4, 'mm'), 72) && near(C.fromPt(72, 'pt'), 72), 'toPt/fromPt mm and pt');
+}
+
+// ---- transform math ----
+{
+  const b = { x: 10, y: 20, w: 100, h: 50 };
+  ok(C.refPoint(b, 'nw').join() === '10,20', 'refPoint nw');
+  ok(C.refPoint(b, 'c').join() === '60,45', 'refPoint c');
+  ok(C.refPoint(b, 'se').join() === '110,70', 'refPoint se');
+  ok(C.refPoint(b, 'bogus').join() === '10,20', 'refPoint falls back to nw');
+}
+{
+  // shear holds the anchor and leans the top to the right
+  const m = C.mShear(45 * C.DEG, 0, 10);
+  const at = C.mApply(m, 5, 10), above = C.mApply(m, 5, 0);
+  ok(near(at[0], 5) && near(at[1], 10), 'mShear fixes the anchor');
+  ok(near(above[0], 15) && near(above[1], 0, 1e-9), 'mShear leans the top right');
+}
+{
+  ok(C.normAngle(370) === 10 && C.normAngle(-190) === 170, 'normAngle wraps');
+  ok(C.normAngle(180) === 180 && C.normAngle(-180) === 180, 'normAngle keeps 180 positive');
+}
+{
+  // W/H scale about the reference point, which never moves
+  const b = { x: 0, y: 0, w: 100, h: 50 };
+  const m = C.transformMatrix(b, { ref: 'nw', w: 200, h: 100 });
+  ok(C.mApply(m, 0, 0).join() === '0,0', 'transformMatrix nw anchor is fixed');
+  ok(C.mApply(m, 100, 50).join() === '200,100', 'transformMatrix scales to w/h');
+  const mc = C.transformMatrix(b, { ref: 'c', w: 200 });
+  ok(near(C.mApply(mc, 50, 25)[0], 50), 'transformMatrix center anchor is fixed');
+  ok(near(C.mApply(mc, 0, 0)[0], -50), 'transformMatrix center scale grows both ways');
+}
+{
+  // X/Y place the reference point itself
+  const b = { x: 10, y: 10, w: 20, h: 20 };
+  const m = C.transformMatrix(b, { ref: 'se', x: 100, y: 200 });
+  ok(C.mApply(m, 30, 30).join() === '100,200', 'transformMatrix moves the ref point to x/y');
+  const z = C.transformMatrix({ x: 5, y: 5, w: 0, h: 0 }, { ref: 'nw', w: 10, h: 10 });
+  ok(z[0] === 1 && z[3] === 1, 'transformMatrix ignores w/h on a zero-size bbox');
+}
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 20, 10) });
+  // multi-object: the combined bbox is what scales
+  C.transformSelection(d, [a.id, b.id], { ref: 'nw', w: 80 });
+  const all = C.shapesBBox(d.shapes);
+  ok(near(all.w, 80) && near(all.x, 0), 'transformSelection scales the combined bbox');
+  ok(near(C.tightBBox(a.cmds).w, 20), 'transformSelection scales members proportionally');
+  ok(near(C.tightBBox(b.cmds).x, 40), 'transformSelection keeps member spacing');
+}
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 40, 20) });
+  ok(a.angle === 0 && a.shear === 0, 'addShape seeds transform bookkeeping');
+  C.transformSelection(d, [a.id], { ref: 'c', angle: 90 });
+  const b = C.tightBBox(a.cmds);
+  ok(near(b.w, 20) && near(b.h, 40), 'transformSelection rotate swaps w/h at 90°');
+  ok(a.angle === 90, 'transformSelection records the angle');
+  C.transformSelection(d, [a.id], { ref: 'c', angle: 90 }); // same absolute angle = no-op
+  ok(near(C.tightBBox(a.cmds).w, 20), 'transformSelection angle is absolute, not cumulative');
+  C.transformSelection(d, [a.id], { ref: 'c', angle: 0 });
+  ok(near(C.tightBBox(a.cmds).w, 40) && a.angle === 0, 'transformSelection rotates back to 0');
+}
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  ok(C.selectionAngles(d, [a.id, b.id]).angle === 0, 'selectionAngles shared value');
+  C.transformSelection(d, [a.id], { ref: 'c', angle: 30 });
+  ok(C.selectionAngles(d, [a.id, b.id]).angle === null, 'selectionAngles null when mixed');
+  ok(C.selectionAngles(d, [a.id]).angle === 30, 'selectionAngles single object');
+  C.transformSelection(d, [a.id], { ref: 'c', shear: 20 });
+  ok(near(C.selectionAngles(d, [a.id]).shear, 20), 'selectionAngles tracks shear');
+  ok(near(C.selectionAngles(d, [a.id]).angle, 30), 'shear does not disturb the angle');
+}
+{
+  // a group moves as one unit under numeric transform
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(30, 0, 10, 10) });
+  C.groupShapes(d, [a.id, b.id]);
+  C.transformSelection(d, [a.id], { ref: 'nw', x: 100 }); // only one member given
+  ok(near(C.tightBBox(a.cmds).x, 100) && near(C.tightBBox(b.cmds).x, 130),
+    'transformSelection expands to the whole group');
+  ok(C.transformSelection(d, [], { ref: 'nw', x: 0 }) === false, 'transformSelection empty is a no-op');
+}
+{
+  // roundtrip keeps the transform bookkeeping
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', fill: '#111', cmds: C.rectPath(0, 0, 10, 10) });
+  C.transformSelection(d, [a.id], { ref: 'c', angle: 45, shear: 10 });
+  const d2 = C.parseDoc(C.serializeDoc(d));
+  ok(near(d2.shapes[0].angle, 45) && near(d2.shapes[0].shear, 10), 'angle/shear survive serialization');
+}
+
+// ---- layers ----
+{
+  const d = C.newDoc();
+  const l2 = C.addLayer(d);
+  ok(d.layers.length === 2 && d.layers[0].id === l2.id, 'addLayer goes on top');
+  ok(l2.id === 'L2' && l2.name === 'Layer 2', 'addLayer names and ids in sequence');
+  ok(l2.visible === true && l2.locked === false, 'addLayer defaults');
+  const l3 = C.addLayer(d, 'Art', 'L1');
+  ok(d.layers.map(l => l.id).join() === 'L2,L3,L1', 'addLayer above a named layer');
+  ok(l3.name === 'Art', 'addLayer custom name');
+  ok(C.renameLayer(d, 'L3', ' Trace ') && C.layerOf(d, 'L3').name === 'Trace', 'renameLayer trims');
+  ok(!C.renameLayer(d, 'L3', '   ') || C.layerOf(d, 'L3').name === 'Trace', 'renameLayer ignores blank');
+  ok(C.renameLayer(d, 'nope', 'x') === false, 'renameLayer unknown layer');
+}
+{
+  // layer order drives z: layers[0] is frontmost, so its shapes end up last
+  const d = C.newDoc();
+  const back = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const l2 = C.addLayer(d);
+  const front = C.addShape(d, { type: 'path', layer: l2.id, cmds: C.rectPath(0, 0, 10, 10) });
+  C.normalizeZ(d);
+  ok(d.shapes.map(s => s.id).join() === [back.id, front.id].join(), 'normalizeZ stacks by layer order');
+  ok(C.reorderLayers(d, 0, 1), 'reorderLayers moves a layer down');
+  ok(d.layers.map(l => l.id).join() === 'L1,L2', 'reorderLayers new order');
+  ok(d.shapes.map(s => s.id).join() === [front.id, back.id].join(), 'reorderLayers restacks shapes');
+  ok(C.reorderLayers(d, 0, 0) === false && C.reorderLayers(d, 0, 9) === false, 'reorderLayers rejects no-ops');
+}
+{
+  // within a layer, the existing z primitives still decide order
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const l2 = C.addLayer(d);
+  const c = C.addShape(d, { type: 'path', layer: l2.id, cmds: C.rectPath(0, 0, 10, 10) });
+  C.bringToFront(d, [a.id]);
+  C.normalizeZ(d);
+  ok(d.shapes.map(s => s.id).join() === [b.id, a.id, c.id].join(),
+    'bringToFront is front-of-layer after normalizeZ');
+}
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const l2 = C.addLayer(d);
+  C.moveShapesToLayer(d, [a.id], l2.id);
+  ok(a.layer === l2.id, 'moveShapesToLayer retags the shape');
+  ok(d.shapes[d.shapes.length - 1].id === a.id, 'moved shape sits on the front layer');
+  ok(C.moveShapesToLayer(d, [a.id], 'nope').length === 0, 'moveShapesToLayer unknown layer');
+  ok(C.moveShapesToLayer(d, ['S404'], l2.id).length === 0, 'moveShapesToLayer unknown shape');
+}
+{
+  // dropping onto a specific shape controls where in the stack it lands
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const c = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  C.moveShapesToLayer(d, [c.id], 'L1', a.id, 'back');
+  ok(d.shapes.map(s => s.id).join() === [c.id, a.id, b.id].join(), 'drop behind an anchor');
+  C.moveShapesToLayer(d, [c.id], 'L1', a.id, 'front');
+  ok(d.shapes.map(s => s.id).join() === [a.id, c.id, b.id].join(), 'drop in front of an anchor');
+}
+{
+  // whole groups move between layers together
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  C.groupShapes(d, [a.id, b.id]);
+  const l2 = C.addLayer(d);
+  C.moveShapesToLayer(d, [a.id], l2.id);
+  ok(a.layer === l2.id && b.layer === l2.id, 'moveShapesToLayer expands to the group');
+}
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  C.groupShapes(d, [a.id, b.id]);
+  const l2 = C.addLayer(d);
+  C.addShape(d, { type: 'path', layer: l2.id, cmds: C.rectPath(0, 0, 10, 10) });
+  ok(C.deleteLayer(d, 'L1'), 'deleteLayer removes the layer');
+  ok(d.shapes.length === 1 && d.shapes[0].layer === l2.id, 'deleteLayer takes its shapes with it');
+  ok(d.groups.length === 0, 'deleteLayer prunes orphaned groups');
+  ok(C.deleteLayer(d, l2.id) === false, 'deleteLayer keeps the last layer');
+  ok(C.deleteLayer(d, 'nope') === false, 'deleteLayer unknown layer');
+}
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  C.groupShapes(d, [a.id, b.id]);
+  C.layerOf(d, 'L1').locked = true;
+  const dup = C.duplicateLayer(d, 'L1');
+  ok(d.layers.map(l => l.id).join() === dup.id + ',L1', 'duplicateLayer sits above the source');
+  ok(dup.name === 'Layer 1 copy' && dup.locked === true, 'duplicateLayer copies name and flags');
+  const copies = d.shapes.filter(s => s.layer === dup.id);
+  ok(copies.length === 2, 'duplicateLayer copies the shapes');
+  ok(copies[0].group && copies[0].group === copies[1].group && copies[0].group !== a.group,
+    'duplicateLayer clones the group tree');
+  ok(C.duplicateLayer(d, 'nope') === null, 'duplicateLayer unknown layer');
+}
+
+// ---- object visibility / lock ----
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  ok(a.hidden === false && a.locked === false, 'addShape defaults visible and unlocked');
+  ok(C.lockShapes(d, [a.id]) === 1 && a.locked === true && b.locked === false, 'lockShapes');
+  ok(C.hideShapes(d, [b.id]) === 1 && b.hidden === true, 'hideShapes');
+  C.unlockAll(d); C.showAll(d);
+  ok(!a.locked && !b.hidden, 'unlockAll / showAll');
+  // ids are literal — locking one group member leaves the rest alone
+  C.groupShapes(d, [a.id, b.id]);
+  C.lockShapes(d, [a.id]);
+  ok(a.locked === true && b.locked === false, 'lockShapes does not expand groups');
+  const d2 = C.parseDoc(C.serializeDoc(d));
+  ok(d2.shapes[0].locked === true, 'flags survive serialization');
+}
+
+// ---- layer tree ----
+{
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', name: 'A', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', name: 'B', cmds: C.rectPath(20, 0, 10, 10) });
+  const c = C.addShape(d, { type: 'path', cmds: C.rectPath(40, 0, 10, 10) });
+  const g = C.groupShapes(d, [a.id, b.id]);
+  const t = C.layerTree(d);
+  ok(t.length === 1 && t[0].id === 'L1' && t[0].name === 'Layer 1', 'layerTree one row per layer');
+  ok(t[0].rows.length === 2, 'layerTree collapses a group into one row');
+  ok(t[0].rows[0].kind === 'shape' && t[0].rows[0].id === c.id, 'layerTree lists front-most first');
+  const grow = t[0].rows[1];
+  ok(grow.kind === 'group' && grow.id === g && grow.ids.length === 2, 'layerTree group row');
+  ok(grow.children.map(r => r.name).join() === 'B,A', 'layerTree group children in reverse z');
+  ok(grow.children[0].kind === 'shape' && grow.layer === 'L1', 'layerTree children carry their layer');
+  ok(t[0].rows[0].name === '<Path>', 'layerTree names unnamed paths');
+}
+{
+  // nested groups nest one level per row
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  const c = C.addShape(d, { type: 'path', cmds: C.rectPath(40, 0, 10, 10) });
+  const inner = C.groupShapes(d, [a.id, b.id]);
+  const outer = C.groupShapes(d, [a.id, c.id]);
+  const rows = C.layerTree(d)[0].rows;
+  ok(rows.length === 1 && rows[0].id === outer, 'layerTree shows the root group only');
+  ok(rows[0].children.length === 2, 'outer group has two children');
+  ok(rows[0].children.some(r => r.id === inner && r.children.length === 2), 'inner group nests');
+}
+{
+  // group rows derive their eye/lock from their members
+  const d = C.newDoc();
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  C.groupShapes(d, [a.id, b.id]);
+  C.hideShapes(d, [a.id]);
+  C.lockShapes(d, [a.id]);
+  let row = C.layerTree(d)[0].rows[0];
+  ok(row.visible === true && row.locked === false, 'group row: partly hidden still shows an open eye');
+  C.hideShapes(d, [b.id]);
+  C.lockShapes(d, [b.id]);
+  row = C.layerTree(d)[0].rows[0];
+  ok(row.visible === false && row.locked === true, 'group row: fully hidden/locked');
+}
+{
+  // multi-layer tree order matches the panel: top layer first
+  const d = C.newDoc();
+  C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  const l2 = C.addLayer(d, 'Top');
+  const up = C.addShape(d, { type: 'path', layer: l2.id, cmds: C.rectPath(0, 0, 10, 10) });
+  const t = C.layerTree(d);
+  ok(t.map(l => l.name).join() === 'Top,Layer 1', 'layerTree top layer first');
+  ok(t[0].rows.length === 1 && t[0].rows[0].id === up.id, 'layerTree rows filtered by layer');
+  ok(t[1].rows.length === 1, 'lower layer keeps its own rows');
+}
+
 console.log(`vectest: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

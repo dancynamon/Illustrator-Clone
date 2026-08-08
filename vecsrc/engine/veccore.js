@@ -8,6 +8,11 @@ const VECCORE = (() => {
   const PT_PER = { in: 72, mm: 72 / 25.4, pt: 1 };
   // 100% zoom = 96 CSS px per inch (screen convention), i.e. 96/72 px per pt.
   const PX_PER_PT_100 = 96 / 72;
+  const DEG = Math.PI / 180;
+
+  // Document points <-> display units (panels type in doc.units, we store pt).
+  function toPt(v, units) { return v * (PT_PER[units] || 1); }
+  function fromPt(v, units) { return v / (PT_PER[units] || 1); }
 
   // ---------- document ----------
   function newDoc(o = {}) {
@@ -31,6 +36,12 @@ const VECCORE = (() => {
     if (shape.stroke === undefined) shape.stroke = null;
     if (shape.opacity == null) shape.opacity = 1;
     if (shape.group === undefined) shape.group = null;
+    if (shape.hidden === undefined) shape.hidden = false;
+    if (shape.locked === undefined) shape.locked = false;
+    // Bookkeeping for the Transform panel: the rotate/shear already baked into
+    // cmds, in degrees. Geometry never reads these.
+    if (shape.angle == null) shape.angle = 0;
+    if (shape.shear == null) shape.shear = 0;
     doc.shapes.push(shape);
     return shape;
   }
@@ -134,7 +145,30 @@ const VECCORE = (() => {
     const c = Math.cos(rad), s = Math.sin(rad);
     return [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy];
   }
+  // Horizontal shear about (cx,cy). Positive angle leans the top of the object
+  // to the right (italic), which is Illustrator's direction in y-down space.
+  function mShear(rad, cx = 0, cy = 0) {
+    const t = -Math.tan(rad);
+    return [1, 0, t, 1, -t * cy, 0];
+  }
   function mApply(m, x, y) { return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; }
+
+  // Transform-panel reference points, named like the bbox handles in the app.
+  const REF_FRAC = {
+    nw: [0, 0], n: [.5, 0], ne: [1, 0],
+    w: [0, .5], c: [.5, .5], e: [1, .5],
+    sw: [0, 1], s: [.5, 1], se: [1, 1],
+  };
+  function refPoint(b, ref) {
+    const f = REF_FRAC[ref] || REF_FRAC.nw;
+    return [b.x + f[0] * b.w, b.y + f[1] * b.h];
+  }
+
+  // Angles are reported in (-180,180] like Illustrator's rotate field.
+  function normAngle(a) {
+    const r = ((a + 180) % 360 + 360) % 360 - 180;
+    return r === -180 ? 180 : r;
+  }
 
   function transformCmds(cmds, m) {
     return cmds.map(c => {
@@ -372,6 +406,237 @@ const VECCORE = (() => {
     }
   }
 
+  // ---------- layers ----------
+  // doc.layers[0] is the top of the Layers panel and the frontmost layer, so
+  // its shapes live at the END of doc.shapes. normalizeZ restores that
+  // invariant after any z-order or layer edit; within a layer the existing
+  // shape order (and therefore bringToFront/sendBackward) is untouched.
+  function layerIndex(doc, id) { return doc.layers.findIndex(l => l.id === id); }
+  function layerOf(doc, id) { return doc.layers.find(l => l.id === id) || null; }
+
+  function normalizeZ(doc) {
+    const n = doc.layers.length;
+    const rank = new Map(doc.layers.map((l, i) => [l.id, n - 1 - i]));
+    doc.shapes = doc.shapes
+      .map((s, i) => [s, i])
+      .sort((a, b) => (rank.get(a[0].layer) || 0) - (rank.get(b[0].layer) || 0) || a[1] - b[1])
+      .map(p => p[0]);
+  }
+
+  function newLayerId(doc) {
+    let n = 0;
+    for (const l of doc.layers) {
+      const m = /^L(\d+)$/.exec(l.id);
+      if (m) n = Math.max(n, +m[1]);
+    }
+    return 'L' + (n + 1);
+  }
+
+  // New layers land above the given layer (above the top when unspecified).
+  function addLayer(doc, name, aboveId) {
+    const id = newLayerId(doc);
+    const l = { id, name: name || 'Layer ' + id.slice(1), visible: true, locked: false };
+    const at = aboveId ? layerIndex(doc, aboveId) : 0;
+    doc.layers.splice(at < 0 ? 0 : at, 0, l);
+    normalizeZ(doc);
+    return l;
+  }
+
+  // Drop group registry entries no shape refers to any more.
+  function pruneGroups(doc) {
+    const live = new Set();
+    for (const s of doc.shapes) {
+      let gid = s.group, seen = new Set();
+      while (gid && !seen.has(gid)) {
+        live.add(gid); seen.add(gid);
+        const g = groupEntry(doc, gid);
+        gid = g ? g.parent : null;
+      }
+    }
+    doc.groups = (doc.groups || []).filter(g => live.has(g.id));
+  }
+
+  // Deletes the layer and everything on it. The last layer never goes away.
+  function deleteLayer(doc, id) {
+    if (doc.layers.length < 2 || layerIndex(doc, id) < 0) return false;
+    doc.layers = doc.layers.filter(l => l.id !== id);
+    doc.shapes = doc.shapes.filter(s => s.layer !== id);
+    pruneGroups(doc);
+    return true;
+  }
+
+  function renameLayer(doc, id, name) {
+    const l = layerOf(doc, id);
+    if (!l) return false;
+    l.name = String(name || '').trim() || l.name;
+    return true;
+  }
+
+  function reorderLayers(doc, from, to) {
+    const n = doc.layers.length;
+    if (from < 0 || from >= n || to < 0 || to >= n || from === to) return false;
+    const [l] = doc.layers.splice(from, 1);
+    doc.layers.splice(to, 0, l);
+    normalizeZ(doc);
+    return true;
+  }
+
+  // Copy a layer and its contents onto a fresh layer directly above it.
+  function duplicateLayer(doc, id) {
+    const src = layerOf(doc, id);
+    if (!src) return null;
+    const ids = doc.shapes.filter(s => s.layer === id).map(s => s.id);
+    const l = addLayer(doc, src.name + ' copy', id);
+    l.visible = src.visible;
+    l.locked = src.locked;
+    for (const nid of duplicateShapes(doc, ids)) {
+      const s = doc.shapes.find(x => x.id === nid);
+      if (s) s.layer = l.id;
+    }
+    normalizeZ(doc);
+    return l;
+  }
+
+  // Move whole units onto a layer. anchorId + side ('front'|'back') drop them
+  // directly in front of / behind that shape; without an anchor they land at
+  // the front of the target layer. Returns the moved ids.
+  function moveShapesToLayer(doc, ids, layerId, anchorId = null, side = 'front') {
+    if (!layerOf(doc, layerId)) return [];
+    const set = new Set(expandIds(doc, ids));
+    const moved = doc.shapes.filter(s => set.has(s.id));
+    if (!moved.length) return [];
+    const rest = doc.shapes.filter(s => !set.has(s.id));
+    for (const s of moved) s.layer = layerId;
+    let at = rest.length;
+    const t = rest.findIndex(s => s.id === anchorId);
+    if (t >= 0) at = side === 'back' ? t : t + 1;
+    else for (let i = 0; i < rest.length; i++) if (rest[i].layer === layerId) at = i + 1;
+    doc.shapes = rest.slice(0, at).concat(moved, rest.slice(at));
+    normalizeZ(doc);
+    return moved.map(s => s.id);
+  }
+
+  // ---------- object visibility / lock ----------
+  // Flags live on shapes; group and layer rows in the panel derive from them.
+  // Ids are taken literally (no group expansion) so a nested group row can be
+  // toggled without dragging its parent along.
+  function setShapeFlags(doc, ids, patch) {
+    const set = new Set(ids);
+    let n = 0;
+    for (const s of doc.shapes) if (set.has(s.id)) { Object.assign(s, patch); n++; }
+    return n;
+  }
+  function lockShapes(doc, ids, on = true) { return setShapeFlags(doc, ids, { locked: !!on }); }
+  function hideShapes(doc, ids, on = true) { return setShapeFlags(doc, ids, { hidden: !!on }); }
+  function unlockAll(doc) { return setShapeFlags(doc, doc.shapes.map(s => s.id), { locked: false }); }
+  function showAll(doc) { return setShapeFlags(doc, doc.shapes.map(s => s.id), { hidden: false }); }
+
+  // ---------- layer tree (panel model) ----------
+  // The innermost group of `shape` whose parent is `parentGid`, or null when
+  // the shape is a direct child of that level.
+  function childGroupOf(doc, shape, parentGid) {
+    let gid = shape.group || null, seen = new Set();
+    while (gid && !seen.has(gid)) {
+      const g = groupEntry(doc, gid);
+      const p = g ? g.parent || null : null;
+      if (p === parentGid) return gid;
+      seen.add(gid);
+      gid = p;
+    }
+    return null;
+  }
+
+  // Rows for one nesting level, front-most first (panel order is reverse z).
+  function treeRows(doc, shapes, parentGid) {
+    const out = [], seen = new Set();
+    for (const s of shapes) {
+      const gid = childGroupOf(doc, s, parentGid);
+      if (!gid) {
+        out.push({
+          kind: 'shape', id: s.id, name: s.name || '<Path>', layer: s.layer,
+          ids: [s.id], visible: !s.hidden, locked: !!s.locked, children: [],
+        });
+        continue;
+      }
+      if (seen.has(gid)) continue;
+      seen.add(gid);
+      const members = shapes.filter(x => childGroupOf(doc, x, parentGid) === gid);
+      out.push({
+        kind: 'group', id: gid, name: '<Group>', layer: members[0].layer,
+        ids: members.map(x => x.id),
+        visible: members.some(x => !x.hidden),
+        locked: members.every(x => !!x.locked),
+        children: treeRows(doc, members, gid),
+      });
+    }
+    return out;
+  }
+
+  // Full panel model: layers top-to-bottom, each with its expandable rows.
+  function layerTree(doc) {
+    return doc.layers.map(l => ({
+      id: l.id, name: l.name, visible: l.visible, locked: !!l.locked,
+      rows: treeRows(doc, doc.shapes.filter(s => s.layer === l.id).reverse(), null),
+    }));
+  }
+
+  // ---------- numeric transform ----------
+  // Shared rotate/shear of a selection, or null where objects disagree.
+  function selectionAngles(doc, ids) {
+    const set = new Set(expandIds(doc, ids));
+    let angle = null, shear = null, mixA = false, mixS = false, first = true;
+    for (const s of doc.shapes) {
+      if (!set.has(s.id)) continue;
+      const a = s.angle || 0, h = s.shear || 0;
+      if (first) { angle = a; shear = h; first = false; }
+      else {
+        if (Math.abs(a - angle) > 1e-6) mixA = true;
+        if (Math.abs(h - shear) > 1e-6) mixS = true;
+      }
+    }
+    return { angle: mixA ? null : angle, shear: mixS ? null : shear };
+  }
+
+  // Matrix taking a selection bbox to the requested numeric state: scale to
+  // w/h, then shear, then rotate (all about the reference point), then move
+  // that point onto x/y. Omitted fields leave their axis alone; rotate/shear
+  // are deltas in radians.
+  function transformMatrix(b, spec) {
+    const [px, py] = refPoint(b, spec.ref);
+    const sx = spec.w != null && b.w > 1e-9 ? spec.w / b.w : 1;
+    const sy = spec.h != null && b.h > 1e-9 ? spec.h / b.h : 1;
+    let m = mScale(sx, sy, px, py);
+    if (spec.shear) m = mMul(mShear(spec.shear, px, py), m);
+    if (spec.rotate) m = mMul(mRotate(spec.rotate, px, py), m);
+    const dx = spec.x != null ? spec.x - px : 0;
+    const dy = spec.y != null ? spec.y - py : 0;
+    if (dx || dy) m = mMul(mTranslate(dx, dy), m);
+    return m;
+  }
+
+  // Apply Transform-panel values to a selection. x/y/w/h are absolute document
+  // points on the combined bbox; angle/shear are absolute degrees resolved
+  // against what the selection already carries.
+  function transformSelection(doc, ids, spec) {
+    const set = new Set(expandIds(doc, ids));
+    const shapes = doc.shapes.filter(s => set.has(s.id));
+    const b = shapesBBox(shapes);
+    if (!b) return false;
+    const cur = selectionAngles(doc, ids);
+    const dRot = spec.angle != null ? spec.angle - (cur.angle || 0) : 0;
+    const dShear = spec.shear != null ? spec.shear - (cur.shear || 0) : 0;
+    const m = transformMatrix(b, {
+      ref: spec.ref, x: spec.x, y: spec.y, w: spec.w, h: spec.h,
+      rotate: dRot * DEG, shear: dShear * DEG,
+    });
+    for (const s of shapes) {
+      s.cmds = transformCmds(s.cmds, m);
+      if (dRot) s.angle = normAngle((s.angle || 0) + dRot);
+      if (dShear) s.shear = normAngle((s.shear || 0) + dShear);
+    }
+    return true;
+  }
+
   // ---------- align & distribute ----------
   // Units move rigidly. Align modes reference the selection bbox; distribute
   // spaces unit centers evenly between the two extremes.
@@ -464,6 +729,10 @@ const VECCORE = (() => {
       s.type = 'path';
       if (!layerIds.has(s.layer)) s.layer = d.layers[0].id;
       if (s.opacity == null || !isFinite(s.opacity)) s.opacity = 1;
+      s.hidden = !!s.hidden;
+      s.locked = !!s.locked;
+      if (!isFinite(s.angle)) s.angle = 0;
+      if (!isFinite(s.shear)) s.shear = 0;
       if (s.fill != null && typeof s.fill !== 'string') s.fill = null;
       if (s.stroke != null && (typeof s.stroke !== 'object' || typeof s.stroke.color !== 'string'
         || !isFinite(s.stroke.w))) s.stroke = null;
@@ -496,6 +765,7 @@ const VECCORE = (() => {
     let next = Math.max(isFinite(d.nextId) ? d.nextId : 1, maxId + 1);
     for (const s of d.shapes) if (!s.id) s.id = 'S' + next++;
     d.nextId = Math.max(next, maxId + 1);
+    normalizeZ(d); // keep layer blocks contiguous even in hand-edited files
     return d;
   }
 
@@ -541,14 +811,18 @@ const VECCORE = (() => {
   }
 
   return {
-    PT_PER, PX_PER_PT_100, KAPPA,
+    PT_PER, PX_PER_PT_100, KAPPA, DEG, REF_FRAC, toPt, fromPt,
     newDoc, addShape,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
     rectPath, ellipsePath, starPath, pathBBox,
-    mMul, mTranslate, mScale, mRotate, mApply, transformCmds,
+    mMul, mTranslate, mScale, mRotate, mShear, mApply, transformCmds,
+    refPoint, normAngle, transformMatrix, transformSelection, selectionAngles,
     flattenPath, tightBBox, shapesBBox, hitTestShape, rectsIntersect,
     rootGroupOf, expandIds, selectionUnits, groupShapes, ungroupShapes, duplicateShapes,
     bringToFront, sendToBack, bringForward, sendBackward, alignUnits,
+    layerIndex, layerOf, normalizeZ, addLayer, deleteLayer, renameLayer,
+    reorderLayers, duplicateLayer, moveShapesToLayer, pruneGroups, layerTree,
+    lockShapes, hideShapes, unlockAll, showAll,
     serializeDoc, parseDoc,
     newHistory, commit, canUndo, canRedo, undo, redo,
     demoDoc,
