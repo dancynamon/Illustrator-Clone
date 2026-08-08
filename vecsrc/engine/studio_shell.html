@@ -117,15 +117,90 @@
   .alignrow button[disabled] { opacity: .35; cursor: default; }
   .alignrow svg { width: 15px; height: 15px; }
 
-  /* layers list */
-  #layerlist { list-style: none; }
-  #layerlist li {
-    display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px;
+  /* transform panel */
+  .panel > h2 .unit { float: right; text-transform: none; letter-spacing: 0; color: #7d7d7d; }
+  .tfmain { display: flex; align-items: center; gap: 7px; }
+  .refgrid {
+    display: grid; grid-template-columns: repeat(3, 11px); gap: 3px;
+    padding: 3px; border: 1px solid #4a4a4a; border-radius: 3px; background: #333334;
   }
-  #layerlist li:hover { background: #343435; }
-  #layerlist .eye { cursor: pointer; width: 16px; text-align: center; color: var(--text-dim); }
-  #layerlist .eye.on { color: var(--text); }
-  #layerlist .lname { flex: 1; }
+  .refgrid button {
+    width: 11px; height: 11px; padding: 0; cursor: pointer;
+    border: 1px solid #5c5c5c; border-radius: 1px; background: #2a2a2b;
+  }
+  .refgrid button:hover { border-color: #7d7d7d; }
+  .refgrid button.on { background: var(--accent); border-color: var(--accent); }
+  .tfcols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 6px; flex: 1; min-width: 0; }
+  .tfangles { margin-top: 6px; }
+  .fld { display: flex; align-items: center; gap: 4px; }
+  .fld .fk {
+    width: 13px; flex: none; color: var(--text-dim); text-align: center;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .fld .fk svg { width: 12px; height: 12px; }
+  .fld input {
+    width: 100%; min-width: 0; padding: 2px 4px; font: inherit;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid #4a4a4a; border-radius: 3px; background: #232324; color: var(--text);
+  }
+  .fld input:focus { outline: 0; border-color: var(--accent); }
+  .fld input:disabled { color: #6a6a6a; background: #2b2b2c; }
+  .chain {
+    width: 14px; height: 30px; flex: none; padding: 0; cursor: pointer;
+    border: 0; background: transparent; color: var(--text-dim);
+  }
+  .chain.on { color: var(--accent); }
+  .chain svg { width: 14px; height: 30px; }
+
+  /* layers panel */
+  .layersbody { padding: 4px 0 0; }
+  #layerlist { position: relative; max-height: 260px; overflow-y: auto; }
+  .lrow {
+    display: flex; align-items: center; gap: 4px; padding: 3px 8px 3px 6px;
+    cursor: default; border: 1px solid transparent;
+  }
+  .lrow:hover { background: #343435; }
+  .lrow.sel { background: #3c4a5c; border-color: #4d6a90; }
+  .lrow.layerrow { background: #303031; }
+  .lrow.layerrow:hover { background: #383839; }
+  .lrow.layerrow.sel { background: #3c4a5c; }
+  .lrow.dragging { opacity: .45; }
+  .lrow .tw {
+    width: 11px; flex: none; text-align: center; color: var(--text-dim); font-size: 9px;
+  }
+  .lrow .tw.leaf { visibility: hidden; }
+  .lrow .eye, .lrow .lk {
+    width: 16px; height: 14px; flex: none; color: var(--text-dim);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .lrow .eye svg, .lrow .lk svg { width: 14px; height: 14px; }
+  .lrow .eye:hover, .lrow .lk:hover { color: #fff; }
+  .lrow .eye.off, .lrow .lk.off { opacity: .22; }
+  .lrow .lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow.layerrow .lname { font-weight: 600; }
+  .lrow .lname input {
+    width: 100%; padding: 0 2px; font: inherit; color: var(--text);
+    border: 1px solid var(--accent); border-radius: 2px; background: #232324;
+  }
+  .lrow .swatch {
+    width: 9px; height: 9px; flex: none; border-radius: 1px; border: 1px solid #5c5c5c;
+  }
+  #dropline {
+    position: absolute; left: 4px; right: 4px; height: 2px; background: var(--accent);
+    pointer-events: none; display: none;
+  }
+  .layerbar {
+    display: flex; gap: 4px; justify-content: flex-end;
+    padding: 5px 8px; border-top: 1px solid var(--edge);
+  }
+  .layerbar button {
+    width: 24px; height: 22px; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .layerbar button:hover:not([disabled]) { background: #454546; color: #fff; }
+  .layerbar button[disabled] { opacity: .35; cursor: default; }
+  .layerbar svg { width: 13px; height: 13px; }
 
   /* ---- status bar ---- */
   #statusbar {
@@ -194,6 +269,51 @@
     </div>
   </div>
   <div class="panel">
+    <h2>Transform <span class="unit" id="t-units">in</span></h2>
+    <div class="body">
+      <div class="tfmain">
+        <div class="refgrid" id="refgrid" title="Reference point">
+          <button data-ref="nw" title="Top left"></button>
+          <button data-ref="n" title="Top"></button>
+          <button data-ref="ne" title="Top right"></button>
+          <button data-ref="w" title="Left"></button>
+          <button data-ref="c" title="Center"></button>
+          <button data-ref="e" title="Right"></button>
+          <button data-ref="sw" title="Bottom left"></button>
+          <button data-ref="s" title="Bottom"></button>
+          <button data-ref="se" title="Bottom right"></button>
+        </div>
+        <div class="tfcols">
+          <label class="fld"><span class="fk">X</span><input id="t-x" type="text" autocomplete="off" title="Reference point X"></label>
+          <label class="fld"><span class="fk">W</span><input id="t-w" type="text" autocomplete="off" title="Width"></label>
+          <label class="fld"><span class="fk">Y</span><input id="t-y" type="text" autocomplete="off" title="Reference point Y"></label>
+          <label class="fld"><span class="fk">H</span><input id="t-h" type="text" autocomplete="off" title="Height"></label>
+        </div>
+        <button class="chain" id="t-chain" title="Constrain width and height proportions">
+          <svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.2">
+            <path d="M2 3.5h4.5v9M2 26.5h4.5v-9"/>
+            <rect x="5.5" y="12" width="6" height="3.4" rx="1.7"/>
+            <rect x="5.5" y="14.6" width="6" height="3.4" rx="1.7"/>
+          </svg>
+        </button>
+      </div>
+      <div class="tfcols tfangles">
+        <label class="fld" title="Rotate">
+          <span class="fk">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 13 L3 6"/><path d="M3 6 A5 5 0 1 1 8 11"/><path d="M6 9 L3 5.5 L0.5 9" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <input id="t-rot" type="text" autocomplete="off">
+        </label>
+        <label class="fld" title="Shear">
+          <span class="fk">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 13 L6 3 L14 3 L10 13 Z"/></svg>
+          </span>
+          <input id="t-shear" type="text" autocomplete="off">
+        </label>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
     <h2>Align</h2>
     <div class="body">
       <div class="alignrow">
@@ -228,7 +348,20 @@
   </div>
   <div class="panel">
     <h2>Layers</h2>
-    <div class="body"><ul id="layerlist"></ul></div>
+    <div class="body layersbody">
+      <div id="layerlist"><div id="dropline"></div></div>
+      <div class="layerbar">
+        <button id="lb-new" title="New Layer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        <button id="lb-dup" title="Duplicate Layer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.5" y="2.5" width="8" height="8"/><rect x="5.5" y="5.5" width="8" height="8"/></svg>
+        </button>
+        <button id="lb-del" title="Delete Layer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9M6.8 6.8v4.6M9.2 6.8v4.6"/></svg>
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 

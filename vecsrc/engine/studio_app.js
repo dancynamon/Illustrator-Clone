@@ -34,8 +34,14 @@
     drag: null,          // select-tool drag state machine
     sel: new Set(),      // selected shape ids (always group-expanded)
     autoFit: true,       // keep fitting on resize until the user changes the view
+    layer: null,         // active layer id (Layers panel target)
+    collapsed: new Set(),// layer ids twisted shut (layers open by default)
+    expanded: new Set(), // group ids twisted open (groups shut by default)
+    ref: 'nw',           // Transform panel reference point
+    constrain: false,    // Transform panel W/H proportion lock
   };
   state.history = C.newHistory(state.doc);
+  state.layer = state.doc.layers[0].id;
 
   // ---------- selection helpers ----------
   function commitNow() {
@@ -50,6 +56,11 @@
   function selectableLayers() {
     return new Set(state.doc.layers.filter(l => l.visible && !l.locked).map(l => l.id));
   }
+  // Hidden/locked objects are out of reach even on a live layer.
+  function selectableShapes() {
+    const ok = selectableLayers();
+    return state.doc.shapes.filter(s => ok.has(s.layer) && !s.hidden && !s.locked);
+  }
   function worldPt(e) {
     const r = canvas.getBoundingClientRect();
     return C.s2w(state.view, e.clientX - r.left, e.clientY - r.top);
@@ -59,12 +70,10 @@
     return [e.clientX - r.left, e.clientY - r.top];
   }
   function hitAt(wx, wy) {
-    const ok = selectableLayers();
+    const live = selectableShapes();
     const tol = 3 / state.view.scale;
-    for (let i = state.doc.shapes.length - 1; i >= 0; i--) {
-      const s = state.doc.shapes[i];
-      if (!ok.has(s.layer)) continue;
-      if (C.hitTestShape(s, wx, wy, tol)) return s;
+    for (let i = live.length - 1; i >= 0; i--) {
+      if (C.hitTestShape(live[i], wx, wy, tol)) return live[i];
     }
     return null;
   }
@@ -119,17 +128,20 @@
   }
 
   // Route every doc mutation through here: history + autosave + repaint.
+  // normalizeZ keeps the shape list grouped by layer, so z-order edits stay
+  // inside their layer the way Illustrator does it.
   function mutate(fn) {
     fn(state.doc);
+    C.normalizeZ(state.doc);
     if (C.commit(state.history, state.doc)) scheduleAutosave();
-    renderLayers();
-    render();
+    refreshDoc();
   }
 
   function refreshDoc() {
     // drop selection ids that no longer exist in the current doc
     const alive = new Set(state.doc.shapes.map(s => s.id));
     state.sel = new Set([...state.sel].filter(id => alive.has(id)));
+    if (!C.layerOf(state.doc, state.layer)) state.layer = state.doc.layers[0].id;
     renderLayers();
     render();
   }
@@ -148,6 +160,9 @@
     state.doc = doc;
     state.history = C.newHistory(doc);
     state.sel.clear();
+    state.layer = doc.layers[0].id;
+    state.collapsed.clear();
+    state.expanded.clear();
     state.autoFit = true;
     scheduleAutosave();
     fitArtboard();
@@ -283,7 +298,7 @@
     ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.tx, dpr * v.ty);
     const hidden = new Set(state.doc.layers.filter(l => !l.visible).map(l => l.id));
     for (const s of state.doc.shapes) {
-      if (hidden.has(s.layer)) continue;
+      if (hidden.has(s.layer) || s.hidden) continue;
       ctx.globalAlpha = s.opacity != null ? s.opacity : 1;
       drawPath(s.cmds);
       if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
@@ -367,28 +382,350 @@
       const dist = btn.dataset.align === 'hdist' || btn.dataset.align === 'vdist';
       btn.disabled = dist ? units < 3 : units < 2;
     });
+    updateTransform();
+    markLayerRows();
+  }
+
+  // ---------- transform panel ----------
+  const TF_INPUTS = ['x', 'y', 'w', 'h', 'rot', 'shear'];
+
+  function fmtNum(v, dp) {
+    return String(+v.toFixed(dp));
+  }
+  // force=true also refreshes the field the user is typing in (after applying).
+  function setField(id, v, dp, force) {
+    const el = $(id);
+    if (!force && document.activeElement === el) return;
+    el.disabled = v === undefined;
+    el.value = v == null ? '' : fmtNum(v, dp);
+  }
+
+  function updateTransform(force) {
+    const u = state.doc.units, k = C.PT_PER[u];
+    $('#t-units').textContent = u;
+    const b = state.sel.size ? C.shapesBBox(selShapes()) : null;
+    const dp = u === 'pt' ? 2 : 4;
+    if (!b) {
+      // undefined = no selection (greyed out); null = mixed (blank but live)
+      for (const f of TF_INPUTS) setField('#t-' + f, undefined, dp, true);
+      return;
+    }
+    const p = C.refPoint(b, state.ref);
+    setField('#t-x', p[0] / k, dp, force);
+    setField('#t-y', p[1] / k, dp, force);
+    setField('#t-w', b.w / k, dp, force);
+    setField('#t-h', b.h / k, dp, force);
+    const a = C.selectionAngles(state.doc, [...state.sel]);
+    setField('#t-rot', a.angle, 2, force);
+    setField('#t-shear', a.shear, 2, force);
+  }
+
+  // One field committed: everything else on the selection stays put.
+  function applyTransformField(which) {
+    if (!state.sel.size) return;
+    const raw = $('#t-' + which).value.trim();
+    const n = parseFloat(raw);
+    if (!raw || !isFinite(n)) { updateTransform(true); return; }
+    const k = C.PT_PER[state.doc.units];
+    const b = C.shapesBBox(selShapes());
+    const spec = { ref: state.ref };
+    if (which === 'x') spec.x = n * k;
+    else if (which === 'y') spec.y = n * k;
+    else if (which === 'w') {
+      spec.w = Math.max(1e-4, n * k);
+      if (state.constrain && b.w > 1e-9) spec.h = b.h * (spec.w / b.w);
+    } else if (which === 'h') {
+      spec.h = Math.max(1e-4, n * k);
+      if (state.constrain && b.h > 1e-9) spec.w = b.w * (spec.h / b.h);
+    } else if (which === 'rot') spec.angle = C.normAngle(n);
+    else spec.shear = Math.max(-89, Math.min(89, n));
+    mutate(d => C.transformSelection(d, [...state.sel], spec));
+    updateTransform(true);
+  }
+
+  for (const f of TF_INPUTS) {
+    const el = $('#t-' + f);
+    el.addEventListener('change', () => applyTransformField(f));
+    el.addEventListener('keydown', e => { if (e.key === 'Escape') { updateTransform(true); el.blur(); } });
+  }
+
+  function setRef(ref) {
+    state.ref = ref;
+    document.querySelectorAll('#refgrid button').forEach(b =>
+      b.classList.toggle('on', b.dataset.ref === ref));
+    updateTransform(true);
+  }
+  document.querySelectorAll('#refgrid button[data-ref]').forEach(b =>
+    b.addEventListener('click', () => setRef(b.dataset.ref)));
+  $('#t-chain').addEventListener('click', () => {
+    state.constrain = !state.constrain;
+    $('#t-chain').classList.toggle('on', state.constrain);
+  });
+
+  // ---------- layers panel ----------
+  const ICON = {
+    eyeOn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1.5 8S4 4.2 8 4.2 14.5 8 14.5 8 12 11.8 8 11.8 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="1.9"/></svg>',
+    eyeOff: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 6.2S4.4 9.4 8 9.4s6-3.2 6-3.2"/><path d="M4.2 8.6 3.1 10.6M8 9.6v2.2M11.8 8.6l1.1 2"/></svg>',
+    lockOn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3.6" y="7.2" width="8.8" height="5.6" rx="1"/><path d="M5.7 7.2V5.4a2.3 2.3 0 0 1 4.6 0v1.8"/></svg>',
+    lockOff: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3.6" y="7.2" width="8.8" height="5.6" rx="1"/><path d="M5.7 7.2V5.4a2.3 2.3 0 0 1 4.6 0"/></svg>',
+  };
+
+  function iconSpan(cls, on, icons, title) {
+    const el = document.createElement('span');
+    el.className = cls + (on ? '' : ' off');
+    el.innerHTML = on ? icons[0] : icons[1];
+    el.title = title;
+    return el;
+  }
+
+  function twistySpan(id, open, expandable) {
+    const el = document.createElement('span');
+    el.className = 'tw' + (expandable ? '' : ' leaf');
+    el.textContent = open ? '▼' : '▶';
+    if (expandable) el.addEventListener('click', e => {
+      e.stopPropagation();
+      const set = id[0] === 'L' ? state.collapsed : state.expanded;
+      set.has(id) ? set.delete(id) : set.add(id);
+      renderLayers();
+    });
+    return el;
+  }
+
+  function nameSpan(text, onRename) {
+    const el = document.createElement('span');
+    el.className = 'lname';
+    el.textContent = text;
+    if (onRename) el.addEventListener('dblclick', e => {
+      e.stopPropagation();
+      const inp = document.createElement('input');
+      inp.value = text;
+      el.textContent = '';
+      el.appendChild(inp);
+      inp.focus();
+      inp.select();
+      let done = false;
+      const finish = keep => {
+        if (done) return;
+        done = true;
+        if (keep) onRename(inp.value); else renderLayers();
+      };
+      inp.addEventListener('blur', () => finish(true));
+      inp.addEventListener('keydown', ev => {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') finish(true);
+        else if (ev.key === 'Escape') finish(false);
+      });
+    });
+    return el;
+  }
+
+  function layerRowEl(l) {
+    const row = document.createElement('div');
+    row.className = 'lrow layerrow';
+    row.dataset.kind = 'layer';
+    row.dataset.layer = l.id;
+    row.dataset.drag = '1';
+    const open = !state.collapsed.has(l.id);
+    row.appendChild(twistySpan(l.id, open, l.rows.length > 0));
+    const eye = iconSpan('eye', l.visible, [ICON.eyeOn, ICON.eyeOff], 'Toggle layer visibility');
+    eye.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => { const t = C.layerOf(d, l.id); if (t) t.visible = !t.visible; });
+    });
+    const lk = iconSpan('lk', l.locked, [ICON.lockOn, ICON.lockOff], 'Toggle layer lock');
+    lk.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => { const t = C.layerOf(d, l.id); if (t) t.locked = !t.locked; });
+    });
+    row.append(eye, lk, nameSpan(l.name, v => mutate(d => C.renameLayer(d, l.id, v))));
+    return row;
+  }
+
+  function objRowEl(r, depth) {
+    const row = document.createElement('div');
+    row.className = 'lrow objrow';
+    row.dataset.kind = 'obj';
+    row.dataset.layer = r.layer;
+    row.dataset.ids = r.ids.join(',');
+    row.dataset.front = r.ids[0];
+    row.dataset.back = r.ids[r.ids.length - 1];
+    row.dataset.drag = depth === 1 ? '1' : '0'; // only whole units leave a layer
+    row.style.paddingLeft = 6 + depth * 12 + 'px';
+    row.appendChild(twistySpan(r.id, state.expanded.has(r.id), r.children.length > 0));
+    const eye = iconSpan('eye', r.visible, [ICON.eyeOn, ICON.eyeOff], 'Toggle visibility');
+    eye.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => C.hideShapes(d, r.ids, r.visible));
+    });
+    const lk = iconSpan('lk', r.locked, [ICON.lockOn, ICON.lockOff], 'Toggle lock');
+    lk.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => C.lockShapes(d, r.ids, !r.locked));
+    });
+    row.append(eye, lk);
+    if (r.kind === 'shape') {
+      const sh = state.doc.shapes.find(s => s.id === r.id);
+      const sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = (sh && (sh.fill || (sh.stroke && sh.stroke.color))) || 'transparent';
+      row.appendChild(sw);
+    }
+    row.appendChild(nameSpan(r.name));
+    return row;
   }
 
   function renderLayers() {
-    const ul = $('#layerlist');
-    ul.innerHTML = '';
-    for (const l of state.doc.layers) {
-      const li = document.createElement('li');
-      const eye = document.createElement('span');
-      eye.className = 'eye' + (l.visible ? ' on' : '');
-      eye.textContent = l.visible ? '◉' : '○';
-      eye.title = 'Toggle visibility';
-      eye.addEventListener('click', () => mutate(d => {
-        const dl = d.layers.find(x => x.id === l.id);
-        if (dl) dl.visible = !dl.visible;
-      }));
-      const name = document.createElement('span');
-      name.className = 'lname';
-      name.textContent = l.name;
-      li.append(eye, name);
-      ul.appendChild(li);
+    const list = $('#layerlist');
+    const top = list.scrollTop;
+    list.querySelectorAll('.lrow').forEach(el => el.remove());
+    const frag = document.createDocumentFragment();
+    const addRows = (rows, depth) => {
+      for (const r of rows) {
+        frag.appendChild(objRowEl(r, depth));
+        if (r.children.length && state.expanded.has(r.id)) addRows(r.children, depth + 1);
+      }
+    };
+    for (const l of C.layerTree(state.doc)) {
+      frag.appendChild(layerRowEl(l));
+      if (!state.collapsed.has(l.id)) addRows(l.rows, 1);
     }
+    list.appendChild(frag);
+    list.scrollTop = top;
+    $('#lb-del').disabled = state.doc.layers.length < 2;
+    markLayerRows();
   }
+
+  // Cheap two-way sync: canvas selection just repaints the row highlights.
+  function markLayerRows() {
+    document.querySelectorAll('#layerlist .lrow').forEach(el => {
+      if (el.dataset.kind === 'layer') {
+        el.classList.toggle('sel', el.dataset.layer === state.layer);
+      } else {
+        const ids = el.dataset.ids.split(',');
+        el.classList.toggle('sel', ids.every(id => state.sel.has(id)));
+      }
+    });
+  }
+
+  function doAddLayer() {
+    mutate(d => {
+      const l = C.addLayer(d, null, state.layer);
+      state.layer = l.id;
+    });
+  }
+  function doDuplicateLayer() {
+    mutate(d => {
+      const l = C.duplicateLayer(d, state.layer);
+      if (l) state.layer = l.id;
+    });
+  }
+  function doDeleteLayer() {
+    if (state.doc.layers.length < 2) return;
+    mutate(d => C.deleteLayer(d, state.layer));
+  }
+  $('#lb-new').addEventListener('click', doAddLayer);
+  $('#lb-dup').addEventListener('click', doDuplicateLayer);
+  $('#lb-del').addEventListener('click', doDeleteLayer);
+
+  // ---------- layers panel drag & drop ----------
+  // Pointer-driven (not HTML5 DnD) so it behaves the same as the canvas drags.
+  let ldrag = null;
+
+  function dropTargetAt(clientY) {
+    const rows = [...document.querySelectorAll('#layerlist .lrow')];
+    for (const row of rows) {
+      const r = row.getBoundingClientRect();
+      if (clientY < r.bottom) return { row, before: clientY < r.top + r.height / 2 };
+    }
+    const last = rows[rows.length - 1];
+    return last ? { row: last, before: false } : null;
+  }
+
+  function showDropLine(t) {
+    const dl = $('#dropline'), list = $('#layerlist');
+    if (!t) { dl.style.display = 'none'; return; }
+    const lr = list.getBoundingClientRect(), r = t.row.getBoundingClientRect();
+    dl.style.display = 'block';
+    dl.style.top = (t.before ? r.top : r.bottom) - lr.top + list.scrollTop - 1 + 'px';
+  }
+
+  function dropLayer(src, t) {
+    const from = C.layerIndex(state.doc, src.dataset.layer);
+    // Every layer row that starts above the drop line stays above the dragged
+    // one, so the count of them is the insertion index.
+    const r = t.row.getBoundingClientRect();
+    const y = t.before ? r.top : r.bottom;
+    let ins = 0;
+    document.querySelectorAll('#layerlist .lrow[data-kind="layer"]').forEach(el => {
+      if (el.getBoundingClientRect().top < y) ins++;
+    });
+    const to = ins > from ? ins - 1 : ins;
+    if (from < 0 || to === from) return;
+    mutate(d => C.reorderLayers(d, from, to));
+  }
+
+  function dropObject(src, t) {
+    const ids = src.dataset.ids.split(',');
+    if (t.row === src || (t.row.dataset.ids || '').split(',').some(id => ids.includes(id))) return;
+    if (t.row.dataset.kind === 'layer') {
+      mutate(d => C.moveShapesToLayer(d, ids, t.row.dataset.layer));
+      state.layer = t.row.dataset.layer;
+    } else {
+      const anchor = t.before ? t.row.dataset.front : t.row.dataset.back;
+      mutate(d => C.moveShapesToLayer(d, ids, t.row.dataset.layer, anchor, t.before ? 'front' : 'back'));
+      state.layer = t.row.dataset.layer;
+    }
+    markLayerRows();
+  }
+
+  // Row activation happens on pointerup so a drag never doubles as a click.
+  function activateRow(row) {
+    if (row.dataset.kind === 'layer') {
+      state.layer = row.dataset.layer;
+      markLayerRows();
+      return;
+    }
+    const ids = row.dataset.ids.split(',');
+    const locked = ids.every(id => {
+      const s = state.doc.shapes.find(x => x.id === id);
+      return !s || s.locked || s.hidden;
+    });
+    const l = C.layerOf(state.doc, row.dataset.layer);
+    if (locked || !l || l.locked || !l.visible) return;
+    setSel(ids);
+    state.layer = row.dataset.layer;
+    markLayerRows();
+    render();
+  }
+
+  $('#layerlist').addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const row = e.target.closest('.lrow');
+    if (!row || e.target.closest('.eye, .lk, .tw') || e.target.tagName === 'INPUT') return;
+    ldrag = { row, y0: e.clientY, moved: false };
+  });
+  window.addEventListener('pointermove', e => {
+    if (!ldrag) return;
+    if (!ldrag.moved) {
+      if (Math.abs(e.clientY - ldrag.y0) < 4) return;
+      if (ldrag.row.dataset.drag !== '1') { ldrag = null; return; }
+      ldrag.moved = true;
+      ldrag.row.classList.add('dragging');
+    }
+    showDropLine(dropTargetAt(e.clientY));
+  });
+  window.addEventListener('pointerup', e => {
+    if (!ldrag) return;
+    const d = ldrag;
+    ldrag = null;
+    d.row.classList.remove('dragging');
+    showDropLine(null);
+    if (!d.moved) { activateRow(d.row); return; }
+    const t = dropTargetAt(e.clientY);
+    if (!t) return;
+    if (d.row.dataset.kind === 'layer') dropLayer(d.row, t);
+    else dropObject(d.row, t);
+  });
 
   // ---------- menus ----------
   const MENUS = {
@@ -410,6 +747,10 @@
       { label: 'Bring Forward', kbd: '⌘]', run: () => doArrange('forward'), enabled: () => state.sel.size > 0 },
       { label: 'Send Backward', kbd: '⌘[', run: () => doArrange('backward'), enabled: () => state.sel.size > 0 },
       { label: 'Send to Back', kbd: '⇧⌘[', run: () => doArrange('back'), enabled: () => state.sel.size > 0 },
+      { label: 'Lock Selection', kbd: '⌘2', run: () => doLock(), enabled: () => state.sel.size > 0 },
+      { label: 'Unlock All', kbd: '⌥⌘2', run: () => doUnlockAll(), enabled: () => state.doc.shapes.some(s => s.locked) },
+      { label: 'Hide Selection', kbd: '⌘3', run: () => doHide(), enabled: () => state.sel.size > 0 },
+      { label: 'Show All', kbd: '⌥⌘3', run: () => doShowAll(), enabled: () => state.doc.shapes.some(s => s.hidden) },
     ],
   };
 
@@ -421,10 +762,24 @@
     return selShapes().some(s => s.group);
   }
   function selectAll() {
-    const ok = selectableLayers();
-    setSel(state.doc.shapes.filter(s => ok.has(s.layer)).map(s => s.id));
+    setSel(selectableShapes().map(s => s.id));
     render();
   }
+  // Illustrator drops the selection once it goes out of reach.
+  function doLock() {
+    if (!state.sel.size) return;
+    mutate(d => C.lockShapes(d, [...state.sel], true));
+    state.sel.clear();
+    render();
+  }
+  function doHide() {
+    if (!state.sel.size) return;
+    mutate(d => C.hideShapes(d, [...state.sel], true));
+    state.sel.clear();
+    render();
+  }
+  function doUnlockAll() { mutate(d => C.unlockAll(d)); }
+  function doShowAll() { mutate(d => C.showAll(d)); }
   function doGroup() {
     if (selUnitCount() < 2) return;
     mutate(d => C.groupShapes(d, [...state.sel]));
@@ -637,6 +992,7 @@
         let da = Math.atan2(wy - d.cy, wx - d.cx) - d.a0;
         if (e.shiftKey) da = Math.round(da / (Math.PI / 4)) * (Math.PI / 4);
         d.moved = true;
+        d.da = da;
         applyDragMatrix(C.mRotate(da, d.cx, d.cy));
         render();
       } else if (d.kind === 'marquee') {
@@ -671,16 +1027,21 @@
       const [ax, ay] = C.s2w(v, Math.min(d.m0[0], d.m1[0]), Math.min(d.m0[1], d.m1[1]));
       const [bx, by] = C.s2w(v, Math.max(d.m0[0], d.m1[0]), Math.max(d.m0[1], d.m1[1]));
       const rect = { x: ax, y: ay, w: bx - ax, h: by - ay };
-      const ok = selectableLayers();
-      const ids = state.doc.shapes
-        .filter(s => ok.has(s.layer))
+      const ids = selectableShapes()
         .filter(s => { const b = C.tightBBox(s.cmds); return b && C.rectsIntersect(b, rect); })
         .map(s => s.id);
       setSel(d.shift ? [...state.sel, ...ids] : ids);
       render();
     } else if (d.moved) {
+      // keep the Transform panel's rotate readout in step with handle drags
+      if (d.kind === 'rotate' && d.da) {
+        const deg = d.da / C.DEG;
+        for (const s of state.doc.shapes) {
+          if (state.sel.has(s.id)) s.angle = C.normAngle((s.angle || 0) + deg);
+        }
+      }
       commitNow();
-      render();
+      refreshDoc();
     }
   });
 
@@ -698,6 +1059,7 @@
   window.addEventListener('keydown', e => {
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
+    if (e.target.tagName === 'INPUT') return; // panel fields own their keys
     if (e.key === 'Escape') {
       closeMenu();
       if (state.sel.size) { state.sel.clear(); render(); }
@@ -710,6 +1072,9 @@
     if (mod && k === 'e') { exportPdfFile(); e.preventDefault(); return; }
     if (mod && k === 'a') { selectAll(); e.preventDefault(); return; }
     if (mod && k === 'g') { e.shiftKey ? doUngroup() : doGroup(); e.preventDefault(); return; }
+    // e.code, because Alt+digit rewrites e.key on some keyboard layouts
+    if (mod && e.code === 'Digit2') { e.altKey ? doUnlockAll() : doLock(); e.preventDefault(); return; }
+    if (mod && e.code === 'Digit3') { e.altKey ? doShowAll() : doHide(); e.preventDefault(); return; }
     if (mod && e.key === ']') { doArrange(e.shiftKey ? 'front' : 'forward'); e.preventDefault(); return; }
     if (mod && e.key === '[') { doArrange(e.shiftKey ? 'back' : 'backward'); e.preventDefault(); return; }
     if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) { doDelete(); e.preventDefault(); return; }
@@ -762,6 +1127,7 @@
   window.addEventListener('resize', resize);
   new ResizeObserver(resize).observe(stagewrap);
   setTool('select');
+  setRef(state.ref);
   renderLayers();
   resize();
 
@@ -771,5 +1137,7 @@
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
     openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
+    renderLayers, markLayerRows, updateTransform, applyTransformField, setRef,
+    doAddLayer, doDuplicateLayer, doDeleteLayer, doLock, doHide, doUnlockAll, doShowAll,
   };
 })();

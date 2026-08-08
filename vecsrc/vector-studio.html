@@ -117,15 +117,90 @@
   .alignrow button[disabled] { opacity: .35; cursor: default; }
   .alignrow svg { width: 15px; height: 15px; }
 
-  /* layers list */
-  #layerlist { list-style: none; }
-  #layerlist li {
-    display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px;
+  /* transform panel */
+  .panel > h2 .unit { float: right; text-transform: none; letter-spacing: 0; color: #7d7d7d; }
+  .tfmain { display: flex; align-items: center; gap: 7px; }
+  .refgrid {
+    display: grid; grid-template-columns: repeat(3, 11px); gap: 3px;
+    padding: 3px; border: 1px solid #4a4a4a; border-radius: 3px; background: #333334;
   }
-  #layerlist li:hover { background: #343435; }
-  #layerlist .eye { cursor: pointer; width: 16px; text-align: center; color: var(--text-dim); }
-  #layerlist .eye.on { color: var(--text); }
-  #layerlist .lname { flex: 1; }
+  .refgrid button {
+    width: 11px; height: 11px; padding: 0; cursor: pointer;
+    border: 1px solid #5c5c5c; border-radius: 1px; background: #2a2a2b;
+  }
+  .refgrid button:hover { border-color: #7d7d7d; }
+  .refgrid button.on { background: var(--accent); border-color: var(--accent); }
+  .tfcols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 6px; flex: 1; min-width: 0; }
+  .tfangles { margin-top: 6px; }
+  .fld { display: flex; align-items: center; gap: 4px; }
+  .fld .fk {
+    width: 13px; flex: none; color: var(--text-dim); text-align: center;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .fld .fk svg { width: 12px; height: 12px; }
+  .fld input {
+    width: 100%; min-width: 0; padding: 2px 4px; font: inherit;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid #4a4a4a; border-radius: 3px; background: #232324; color: var(--text);
+  }
+  .fld input:focus { outline: 0; border-color: var(--accent); }
+  .fld input:disabled { color: #6a6a6a; background: #2b2b2c; }
+  .chain {
+    width: 14px; height: 30px; flex: none; padding: 0; cursor: pointer;
+    border: 0; background: transparent; color: var(--text-dim);
+  }
+  .chain.on { color: var(--accent); }
+  .chain svg { width: 14px; height: 30px; }
+
+  /* layers panel */
+  .layersbody { padding: 4px 0 0; }
+  #layerlist { position: relative; max-height: 260px; overflow-y: auto; }
+  .lrow {
+    display: flex; align-items: center; gap: 4px; padding: 3px 8px 3px 6px;
+    cursor: default; border: 1px solid transparent;
+  }
+  .lrow:hover { background: #343435; }
+  .lrow.sel { background: #3c4a5c; border-color: #4d6a90; }
+  .lrow.layerrow { background: #303031; }
+  .lrow.layerrow:hover { background: #383839; }
+  .lrow.layerrow.sel { background: #3c4a5c; }
+  .lrow.dragging { opacity: .45; }
+  .lrow .tw {
+    width: 11px; flex: none; text-align: center; color: var(--text-dim); font-size: 9px;
+  }
+  .lrow .tw.leaf { visibility: hidden; }
+  .lrow .eye, .lrow .lk {
+    width: 16px; height: 14px; flex: none; color: var(--text-dim);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .lrow .eye svg, .lrow .lk svg { width: 14px; height: 14px; }
+  .lrow .eye:hover, .lrow .lk:hover { color: #fff; }
+  .lrow .eye.off, .lrow .lk.off { opacity: .22; }
+  .lrow .lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow.layerrow .lname { font-weight: 600; }
+  .lrow .lname input {
+    width: 100%; padding: 0 2px; font: inherit; color: var(--text);
+    border: 1px solid var(--accent); border-radius: 2px; background: #232324;
+  }
+  .lrow .swatch {
+    width: 9px; height: 9px; flex: none; border-radius: 1px; border: 1px solid #5c5c5c;
+  }
+  #dropline {
+    position: absolute; left: 4px; right: 4px; height: 2px; background: var(--accent);
+    pointer-events: none; display: none;
+  }
+  .layerbar {
+    display: flex; gap: 4px; justify-content: flex-end;
+    padding: 5px 8px; border-top: 1px solid var(--edge);
+  }
+  .layerbar button {
+    width: 24px; height: 22px; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--tool); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .layerbar button:hover:not([disabled]) { background: #454546; color: #fff; }
+  .layerbar button[disabled] { opacity: .35; cursor: default; }
+  .layerbar svg { width: 13px; height: 13px; }
 
   /* ---- status bar ---- */
   #statusbar {
@@ -194,6 +269,51 @@
     </div>
   </div>
   <div class="panel">
+    <h2>Transform <span class="unit" id="t-units">in</span></h2>
+    <div class="body">
+      <div class="tfmain">
+        <div class="refgrid" id="refgrid" title="Reference point">
+          <button data-ref="nw" title="Top left"></button>
+          <button data-ref="n" title="Top"></button>
+          <button data-ref="ne" title="Top right"></button>
+          <button data-ref="w" title="Left"></button>
+          <button data-ref="c" title="Center"></button>
+          <button data-ref="e" title="Right"></button>
+          <button data-ref="sw" title="Bottom left"></button>
+          <button data-ref="s" title="Bottom"></button>
+          <button data-ref="se" title="Bottom right"></button>
+        </div>
+        <div class="tfcols">
+          <label class="fld"><span class="fk">X</span><input id="t-x" type="text" autocomplete="off" title="Reference point X"></label>
+          <label class="fld"><span class="fk">W</span><input id="t-w" type="text" autocomplete="off" title="Width"></label>
+          <label class="fld"><span class="fk">Y</span><input id="t-y" type="text" autocomplete="off" title="Reference point Y"></label>
+          <label class="fld"><span class="fk">H</span><input id="t-h" type="text" autocomplete="off" title="Height"></label>
+        </div>
+        <button class="chain" id="t-chain" title="Constrain width and height proportions">
+          <svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.2">
+            <path d="M2 3.5h4.5v9M2 26.5h4.5v-9"/>
+            <rect x="5.5" y="12" width="6" height="3.4" rx="1.7"/>
+            <rect x="5.5" y="14.6" width="6" height="3.4" rx="1.7"/>
+          </svg>
+        </button>
+      </div>
+      <div class="tfcols tfangles">
+        <label class="fld" title="Rotate">
+          <span class="fk">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 13 L3 6"/><path d="M3 6 A5 5 0 1 1 8 11"/><path d="M6 9 L3 5.5 L0.5 9" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <input id="t-rot" type="text" autocomplete="off">
+        </label>
+        <label class="fld" title="Shear">
+          <span class="fk">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 13 L6 3 L14 3 L10 13 Z"/></svg>
+          </span>
+          <input id="t-shear" type="text" autocomplete="off">
+        </label>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
     <h2>Align</h2>
     <div class="body">
       <div class="alignrow">
@@ -228,7 +348,20 @@
   </div>
   <div class="panel">
     <h2>Layers</h2>
-    <div class="body"><ul id="layerlist"></ul></div>
+    <div class="body layersbody">
+      <div id="layerlist"><div id="dropline"></div></div>
+      <div class="layerbar">
+        <button id="lb-new" title="New Layer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        <button id="lb-dup" title="Duplicate Layer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.5" y="2.5" width="8" height="8"/><rect x="5.5" y="5.5" width="8" height="8"/></svg>
+        </button>
+        <button id="lb-del" title="Delete Layer">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9M6.8 6.8v4.6M9.2 6.8v4.6"/></svg>
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -251,6 +384,11 @@ const VECCORE = (() => {
   const PT_PER = { in: 72, mm: 72 / 25.4, pt: 1 };
   // 100% zoom = 96 CSS px per inch (screen convention), i.e. 96/72 px per pt.
   const PX_PER_PT_100 = 96 / 72;
+  const DEG = Math.PI / 180;
+
+  // Document points <-> display units (panels type in doc.units, we store pt).
+  function toPt(v, units) { return v * (PT_PER[units] || 1); }
+  function fromPt(v, units) { return v / (PT_PER[units] || 1); }
 
   // ---------- document ----------
   function newDoc(o = {}) {
@@ -274,6 +412,12 @@ const VECCORE = (() => {
     if (shape.stroke === undefined) shape.stroke = null;
     if (shape.opacity == null) shape.opacity = 1;
     if (shape.group === undefined) shape.group = null;
+    if (shape.hidden === undefined) shape.hidden = false;
+    if (shape.locked === undefined) shape.locked = false;
+    // Bookkeeping for the Transform panel: the rotate/shear already baked into
+    // cmds, in degrees. Geometry never reads these.
+    if (shape.angle == null) shape.angle = 0;
+    if (shape.shear == null) shape.shear = 0;
     doc.shapes.push(shape);
     return shape;
   }
@@ -377,7 +521,30 @@ const VECCORE = (() => {
     const c = Math.cos(rad), s = Math.sin(rad);
     return [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy];
   }
+  // Horizontal shear about (cx,cy). Positive angle leans the top of the object
+  // to the right (italic), which is Illustrator's direction in y-down space.
+  function mShear(rad, cx = 0, cy = 0) {
+    const t = -Math.tan(rad);
+    return [1, 0, t, 1, -t * cy, 0];
+  }
   function mApply(m, x, y) { return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; }
+
+  // Transform-panel reference points, named like the bbox handles in the app.
+  const REF_FRAC = {
+    nw: [0, 0], n: [.5, 0], ne: [1, 0],
+    w: [0, .5], c: [.5, .5], e: [1, .5],
+    sw: [0, 1], s: [.5, 1], se: [1, 1],
+  };
+  function refPoint(b, ref) {
+    const f = REF_FRAC[ref] || REF_FRAC.nw;
+    return [b.x + f[0] * b.w, b.y + f[1] * b.h];
+  }
+
+  // Angles are reported in (-180,180] like Illustrator's rotate field.
+  function normAngle(a) {
+    const r = ((a + 180) % 360 + 360) % 360 - 180;
+    return r === -180 ? 180 : r;
+  }
 
   function transformCmds(cmds, m) {
     return cmds.map(c => {
@@ -615,6 +782,237 @@ const VECCORE = (() => {
     }
   }
 
+  // ---------- layers ----------
+  // doc.layers[0] is the top of the Layers panel and the frontmost layer, so
+  // its shapes live at the END of doc.shapes. normalizeZ restores that
+  // invariant after any z-order or layer edit; within a layer the existing
+  // shape order (and therefore bringToFront/sendBackward) is untouched.
+  function layerIndex(doc, id) { return doc.layers.findIndex(l => l.id === id); }
+  function layerOf(doc, id) { return doc.layers.find(l => l.id === id) || null; }
+
+  function normalizeZ(doc) {
+    const n = doc.layers.length;
+    const rank = new Map(doc.layers.map((l, i) => [l.id, n - 1 - i]));
+    doc.shapes = doc.shapes
+      .map((s, i) => [s, i])
+      .sort((a, b) => (rank.get(a[0].layer) || 0) - (rank.get(b[0].layer) || 0) || a[1] - b[1])
+      .map(p => p[0]);
+  }
+
+  function newLayerId(doc) {
+    let n = 0;
+    for (const l of doc.layers) {
+      const m = /^L(\d+)$/.exec(l.id);
+      if (m) n = Math.max(n, +m[1]);
+    }
+    return 'L' + (n + 1);
+  }
+
+  // New layers land above the given layer (above the top when unspecified).
+  function addLayer(doc, name, aboveId) {
+    const id = newLayerId(doc);
+    const l = { id, name: name || 'Layer ' + id.slice(1), visible: true, locked: false };
+    const at = aboveId ? layerIndex(doc, aboveId) : 0;
+    doc.layers.splice(at < 0 ? 0 : at, 0, l);
+    normalizeZ(doc);
+    return l;
+  }
+
+  // Drop group registry entries no shape refers to any more.
+  function pruneGroups(doc) {
+    const live = new Set();
+    for (const s of doc.shapes) {
+      let gid = s.group, seen = new Set();
+      while (gid && !seen.has(gid)) {
+        live.add(gid); seen.add(gid);
+        const g = groupEntry(doc, gid);
+        gid = g ? g.parent : null;
+      }
+    }
+    doc.groups = (doc.groups || []).filter(g => live.has(g.id));
+  }
+
+  // Deletes the layer and everything on it. The last layer never goes away.
+  function deleteLayer(doc, id) {
+    if (doc.layers.length < 2 || layerIndex(doc, id) < 0) return false;
+    doc.layers = doc.layers.filter(l => l.id !== id);
+    doc.shapes = doc.shapes.filter(s => s.layer !== id);
+    pruneGroups(doc);
+    return true;
+  }
+
+  function renameLayer(doc, id, name) {
+    const l = layerOf(doc, id);
+    if (!l) return false;
+    l.name = String(name || '').trim() || l.name;
+    return true;
+  }
+
+  function reorderLayers(doc, from, to) {
+    const n = doc.layers.length;
+    if (from < 0 || from >= n || to < 0 || to >= n || from === to) return false;
+    const [l] = doc.layers.splice(from, 1);
+    doc.layers.splice(to, 0, l);
+    normalizeZ(doc);
+    return true;
+  }
+
+  // Copy a layer and its contents onto a fresh layer directly above it.
+  function duplicateLayer(doc, id) {
+    const src = layerOf(doc, id);
+    if (!src) return null;
+    const ids = doc.shapes.filter(s => s.layer === id).map(s => s.id);
+    const l = addLayer(doc, src.name + ' copy', id);
+    l.visible = src.visible;
+    l.locked = src.locked;
+    for (const nid of duplicateShapes(doc, ids)) {
+      const s = doc.shapes.find(x => x.id === nid);
+      if (s) s.layer = l.id;
+    }
+    normalizeZ(doc);
+    return l;
+  }
+
+  // Move whole units onto a layer. anchorId + side ('front'|'back') drop them
+  // directly in front of / behind that shape; without an anchor they land at
+  // the front of the target layer. Returns the moved ids.
+  function moveShapesToLayer(doc, ids, layerId, anchorId = null, side = 'front') {
+    if (!layerOf(doc, layerId)) return [];
+    const set = new Set(expandIds(doc, ids));
+    const moved = doc.shapes.filter(s => set.has(s.id));
+    if (!moved.length) return [];
+    const rest = doc.shapes.filter(s => !set.has(s.id));
+    for (const s of moved) s.layer = layerId;
+    let at = rest.length;
+    const t = rest.findIndex(s => s.id === anchorId);
+    if (t >= 0) at = side === 'back' ? t : t + 1;
+    else for (let i = 0; i < rest.length; i++) if (rest[i].layer === layerId) at = i + 1;
+    doc.shapes = rest.slice(0, at).concat(moved, rest.slice(at));
+    normalizeZ(doc);
+    return moved.map(s => s.id);
+  }
+
+  // ---------- object visibility / lock ----------
+  // Flags live on shapes; group and layer rows in the panel derive from them.
+  // Ids are taken literally (no group expansion) so a nested group row can be
+  // toggled without dragging its parent along.
+  function setShapeFlags(doc, ids, patch) {
+    const set = new Set(ids);
+    let n = 0;
+    for (const s of doc.shapes) if (set.has(s.id)) { Object.assign(s, patch); n++; }
+    return n;
+  }
+  function lockShapes(doc, ids, on = true) { return setShapeFlags(doc, ids, { locked: !!on }); }
+  function hideShapes(doc, ids, on = true) { return setShapeFlags(doc, ids, { hidden: !!on }); }
+  function unlockAll(doc) { return setShapeFlags(doc, doc.shapes.map(s => s.id), { locked: false }); }
+  function showAll(doc) { return setShapeFlags(doc, doc.shapes.map(s => s.id), { hidden: false }); }
+
+  // ---------- layer tree (panel model) ----------
+  // The innermost group of `shape` whose parent is `parentGid`, or null when
+  // the shape is a direct child of that level.
+  function childGroupOf(doc, shape, parentGid) {
+    let gid = shape.group || null, seen = new Set();
+    while (gid && !seen.has(gid)) {
+      const g = groupEntry(doc, gid);
+      const p = g ? g.parent || null : null;
+      if (p === parentGid) return gid;
+      seen.add(gid);
+      gid = p;
+    }
+    return null;
+  }
+
+  // Rows for one nesting level, front-most first (panel order is reverse z).
+  function treeRows(doc, shapes, parentGid) {
+    const out = [], seen = new Set();
+    for (const s of shapes) {
+      const gid = childGroupOf(doc, s, parentGid);
+      if (!gid) {
+        out.push({
+          kind: 'shape', id: s.id, name: s.name || '<Path>', layer: s.layer,
+          ids: [s.id], visible: !s.hidden, locked: !!s.locked, children: [],
+        });
+        continue;
+      }
+      if (seen.has(gid)) continue;
+      seen.add(gid);
+      const members = shapes.filter(x => childGroupOf(doc, x, parentGid) === gid);
+      out.push({
+        kind: 'group', id: gid, name: '<Group>', layer: members[0].layer,
+        ids: members.map(x => x.id),
+        visible: members.some(x => !x.hidden),
+        locked: members.every(x => !!x.locked),
+        children: treeRows(doc, members, gid),
+      });
+    }
+    return out;
+  }
+
+  // Full panel model: layers top-to-bottom, each with its expandable rows.
+  function layerTree(doc) {
+    return doc.layers.map(l => ({
+      id: l.id, name: l.name, visible: l.visible, locked: !!l.locked,
+      rows: treeRows(doc, doc.shapes.filter(s => s.layer === l.id).reverse(), null),
+    }));
+  }
+
+  // ---------- numeric transform ----------
+  // Shared rotate/shear of a selection, or null where objects disagree.
+  function selectionAngles(doc, ids) {
+    const set = new Set(expandIds(doc, ids));
+    let angle = null, shear = null, mixA = false, mixS = false, first = true;
+    for (const s of doc.shapes) {
+      if (!set.has(s.id)) continue;
+      const a = s.angle || 0, h = s.shear || 0;
+      if (first) { angle = a; shear = h; first = false; }
+      else {
+        if (Math.abs(a - angle) > 1e-6) mixA = true;
+        if (Math.abs(h - shear) > 1e-6) mixS = true;
+      }
+    }
+    return { angle: mixA ? null : angle, shear: mixS ? null : shear };
+  }
+
+  // Matrix taking a selection bbox to the requested numeric state: scale to
+  // w/h, then shear, then rotate (all about the reference point), then move
+  // that point onto x/y. Omitted fields leave their axis alone; rotate/shear
+  // are deltas in radians.
+  function transformMatrix(b, spec) {
+    const [px, py] = refPoint(b, spec.ref);
+    const sx = spec.w != null && b.w > 1e-9 ? spec.w / b.w : 1;
+    const sy = spec.h != null && b.h > 1e-9 ? spec.h / b.h : 1;
+    let m = mScale(sx, sy, px, py);
+    if (spec.shear) m = mMul(mShear(spec.shear, px, py), m);
+    if (spec.rotate) m = mMul(mRotate(spec.rotate, px, py), m);
+    const dx = spec.x != null ? spec.x - px : 0;
+    const dy = spec.y != null ? spec.y - py : 0;
+    if (dx || dy) m = mMul(mTranslate(dx, dy), m);
+    return m;
+  }
+
+  // Apply Transform-panel values to a selection. x/y/w/h are absolute document
+  // points on the combined bbox; angle/shear are absolute degrees resolved
+  // against what the selection already carries.
+  function transformSelection(doc, ids, spec) {
+    const set = new Set(expandIds(doc, ids));
+    const shapes = doc.shapes.filter(s => set.has(s.id));
+    const b = shapesBBox(shapes);
+    if (!b) return false;
+    const cur = selectionAngles(doc, ids);
+    const dRot = spec.angle != null ? spec.angle - (cur.angle || 0) : 0;
+    const dShear = spec.shear != null ? spec.shear - (cur.shear || 0) : 0;
+    const m = transformMatrix(b, {
+      ref: spec.ref, x: spec.x, y: spec.y, w: spec.w, h: spec.h,
+      rotate: dRot * DEG, shear: dShear * DEG,
+    });
+    for (const s of shapes) {
+      s.cmds = transformCmds(s.cmds, m);
+      if (dRot) s.angle = normAngle((s.angle || 0) + dRot);
+      if (dShear) s.shear = normAngle((s.shear || 0) + dShear);
+    }
+    return true;
+  }
+
   // ---------- align & distribute ----------
   // Units move rigidly. Align modes reference the selection bbox; distribute
   // spaces unit centers evenly between the two extremes.
@@ -707,6 +1105,10 @@ const VECCORE = (() => {
       s.type = 'path';
       if (!layerIds.has(s.layer)) s.layer = d.layers[0].id;
       if (s.opacity == null || !isFinite(s.opacity)) s.opacity = 1;
+      s.hidden = !!s.hidden;
+      s.locked = !!s.locked;
+      if (!isFinite(s.angle)) s.angle = 0;
+      if (!isFinite(s.shear)) s.shear = 0;
       if (s.fill != null && typeof s.fill !== 'string') s.fill = null;
       if (s.stroke != null && (typeof s.stroke !== 'object' || typeof s.stroke.color !== 'string'
         || !isFinite(s.stroke.w))) s.stroke = null;
@@ -739,6 +1141,7 @@ const VECCORE = (() => {
     let next = Math.max(isFinite(d.nextId) ? d.nextId : 1, maxId + 1);
     for (const s of d.shapes) if (!s.id) s.id = 'S' + next++;
     d.nextId = Math.max(next, maxId + 1);
+    normalizeZ(d); // keep layer blocks contiguous even in hand-edited files
     return d;
   }
 
@@ -784,14 +1187,18 @@ const VECCORE = (() => {
   }
 
   return {
-    PT_PER, PX_PER_PT_100, KAPPA,
+    PT_PER, PX_PER_PT_100, KAPPA, DEG, REF_FRAC, toPt, fromPt,
     newDoc, addShape,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
     rectPath, ellipsePath, starPath, pathBBox,
-    mMul, mTranslate, mScale, mRotate, mApply, transformCmds,
+    mMul, mTranslate, mScale, mRotate, mShear, mApply, transformCmds,
+    refPoint, normAngle, transformMatrix, transformSelection, selectionAngles,
     flattenPath, tightBBox, shapesBBox, hitTestShape, rectsIntersect,
     rootGroupOf, expandIds, selectionUnits, groupShapes, ungroupShapes, duplicateShapes,
     bringToFront, sendToBack, bringForward, sendBackward, alignUnits,
+    layerIndex, layerOf, normalizeZ, addLayer, deleteLayer, renameLayer,
+    reorderLayers, duplicateLayer, moveShapesToLayer, pruneGroups, layerTree,
+    lockShapes, hideShapes, unlockAll, showAll,
     serializeDoc, parseDoc,
     newHistory, commit, canUndo, canRedo, undo, redo,
     demoDoc,
@@ -2144,8 +2551,14 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     drag: null,          // select-tool drag state machine
     sel: new Set(),      // selected shape ids (always group-expanded)
     autoFit: true,       // keep fitting on resize until the user changes the view
+    layer: null,         // active layer id (Layers panel target)
+    collapsed: new Set(),// layer ids twisted shut (layers open by default)
+    expanded: new Set(), // group ids twisted open (groups shut by default)
+    ref: 'nw',           // Transform panel reference point
+    constrain: false,    // Transform panel W/H proportion lock
   };
   state.history = C.newHistory(state.doc);
+  state.layer = state.doc.layers[0].id;
 
   // ---------- selection helpers ----------
   function commitNow() {
@@ -2160,6 +2573,11 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
   function selectableLayers() {
     return new Set(state.doc.layers.filter(l => l.visible && !l.locked).map(l => l.id));
   }
+  // Hidden/locked objects are out of reach even on a live layer.
+  function selectableShapes() {
+    const ok = selectableLayers();
+    return state.doc.shapes.filter(s => ok.has(s.layer) && !s.hidden && !s.locked);
+  }
   function worldPt(e) {
     const r = canvas.getBoundingClientRect();
     return C.s2w(state.view, e.clientX - r.left, e.clientY - r.top);
@@ -2169,12 +2587,10 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     return [e.clientX - r.left, e.clientY - r.top];
   }
   function hitAt(wx, wy) {
-    const ok = selectableLayers();
+    const live = selectableShapes();
     const tol = 3 / state.view.scale;
-    for (let i = state.doc.shapes.length - 1; i >= 0; i--) {
-      const s = state.doc.shapes[i];
-      if (!ok.has(s.layer)) continue;
-      if (C.hitTestShape(s, wx, wy, tol)) return s;
+    for (let i = live.length - 1; i >= 0; i--) {
+      if (C.hitTestShape(live[i], wx, wy, tol)) return live[i];
     }
     return null;
   }
@@ -2229,17 +2645,20 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
   }
 
   // Route every doc mutation through here: history + autosave + repaint.
+  // normalizeZ keeps the shape list grouped by layer, so z-order edits stay
+  // inside their layer the way Illustrator does it.
   function mutate(fn) {
     fn(state.doc);
+    C.normalizeZ(state.doc);
     if (C.commit(state.history, state.doc)) scheduleAutosave();
-    renderLayers();
-    render();
+    refreshDoc();
   }
 
   function refreshDoc() {
     // drop selection ids that no longer exist in the current doc
     const alive = new Set(state.doc.shapes.map(s => s.id));
     state.sel = new Set([...state.sel].filter(id => alive.has(id)));
+    if (!C.layerOf(state.doc, state.layer)) state.layer = state.doc.layers[0].id;
     renderLayers();
     render();
   }
@@ -2258,6 +2677,9 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     state.doc = doc;
     state.history = C.newHistory(doc);
     state.sel.clear();
+    state.layer = doc.layers[0].id;
+    state.collapsed.clear();
+    state.expanded.clear();
     state.autoFit = true;
     scheduleAutosave();
     fitArtboard();
@@ -2393,7 +2815,7 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.tx, dpr * v.ty);
     const hidden = new Set(state.doc.layers.filter(l => !l.visible).map(l => l.id));
     for (const s of state.doc.shapes) {
-      if (hidden.has(s.layer)) continue;
+      if (hidden.has(s.layer) || s.hidden) continue;
       ctx.globalAlpha = s.opacity != null ? s.opacity : 1;
       drawPath(s.cmds);
       if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
@@ -2477,28 +2899,350 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
       const dist = btn.dataset.align === 'hdist' || btn.dataset.align === 'vdist';
       btn.disabled = dist ? units < 3 : units < 2;
     });
+    updateTransform();
+    markLayerRows();
+  }
+
+  // ---------- transform panel ----------
+  const TF_INPUTS = ['x', 'y', 'w', 'h', 'rot', 'shear'];
+
+  function fmtNum(v, dp) {
+    return String(+v.toFixed(dp));
+  }
+  // force=true also refreshes the field the user is typing in (after applying).
+  function setField(id, v, dp, force) {
+    const el = $(id);
+    if (!force && document.activeElement === el) return;
+    el.disabled = v === undefined;
+    el.value = v == null ? '' : fmtNum(v, dp);
+  }
+
+  function updateTransform(force) {
+    const u = state.doc.units, k = C.PT_PER[u];
+    $('#t-units').textContent = u;
+    const b = state.sel.size ? C.shapesBBox(selShapes()) : null;
+    const dp = u === 'pt' ? 2 : 4;
+    if (!b) {
+      // undefined = no selection (greyed out); null = mixed (blank but live)
+      for (const f of TF_INPUTS) setField('#t-' + f, undefined, dp, true);
+      return;
+    }
+    const p = C.refPoint(b, state.ref);
+    setField('#t-x', p[0] / k, dp, force);
+    setField('#t-y', p[1] / k, dp, force);
+    setField('#t-w', b.w / k, dp, force);
+    setField('#t-h', b.h / k, dp, force);
+    const a = C.selectionAngles(state.doc, [...state.sel]);
+    setField('#t-rot', a.angle, 2, force);
+    setField('#t-shear', a.shear, 2, force);
+  }
+
+  // One field committed: everything else on the selection stays put.
+  function applyTransformField(which) {
+    if (!state.sel.size) return;
+    const raw = $('#t-' + which).value.trim();
+    const n = parseFloat(raw);
+    if (!raw || !isFinite(n)) { updateTransform(true); return; }
+    const k = C.PT_PER[state.doc.units];
+    const b = C.shapesBBox(selShapes());
+    const spec = { ref: state.ref };
+    if (which === 'x') spec.x = n * k;
+    else if (which === 'y') spec.y = n * k;
+    else if (which === 'w') {
+      spec.w = Math.max(1e-4, n * k);
+      if (state.constrain && b.w > 1e-9) spec.h = b.h * (spec.w / b.w);
+    } else if (which === 'h') {
+      spec.h = Math.max(1e-4, n * k);
+      if (state.constrain && b.h > 1e-9) spec.w = b.w * (spec.h / b.h);
+    } else if (which === 'rot') spec.angle = C.normAngle(n);
+    else spec.shear = Math.max(-89, Math.min(89, n));
+    mutate(d => C.transformSelection(d, [...state.sel], spec));
+    updateTransform(true);
+  }
+
+  for (const f of TF_INPUTS) {
+    const el = $('#t-' + f);
+    el.addEventListener('change', () => applyTransformField(f));
+    el.addEventListener('keydown', e => { if (e.key === 'Escape') { updateTransform(true); el.blur(); } });
+  }
+
+  function setRef(ref) {
+    state.ref = ref;
+    document.querySelectorAll('#refgrid button').forEach(b =>
+      b.classList.toggle('on', b.dataset.ref === ref));
+    updateTransform(true);
+  }
+  document.querySelectorAll('#refgrid button[data-ref]').forEach(b =>
+    b.addEventListener('click', () => setRef(b.dataset.ref)));
+  $('#t-chain').addEventListener('click', () => {
+    state.constrain = !state.constrain;
+    $('#t-chain').classList.toggle('on', state.constrain);
+  });
+
+  // ---------- layers panel ----------
+  const ICON = {
+    eyeOn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1.5 8S4 4.2 8 4.2 14.5 8 14.5 8 12 11.8 8 11.8 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="1.9"/></svg>',
+    eyeOff: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 6.2S4.4 9.4 8 9.4s6-3.2 6-3.2"/><path d="M4.2 8.6 3.1 10.6M8 9.6v2.2M11.8 8.6l1.1 2"/></svg>',
+    lockOn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3.6" y="7.2" width="8.8" height="5.6" rx="1"/><path d="M5.7 7.2V5.4a2.3 2.3 0 0 1 4.6 0v1.8"/></svg>',
+    lockOff: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3.6" y="7.2" width="8.8" height="5.6" rx="1"/><path d="M5.7 7.2V5.4a2.3 2.3 0 0 1 4.6 0"/></svg>',
+  };
+
+  function iconSpan(cls, on, icons, title) {
+    const el = document.createElement('span');
+    el.className = cls + (on ? '' : ' off');
+    el.innerHTML = on ? icons[0] : icons[1];
+    el.title = title;
+    return el;
+  }
+
+  function twistySpan(id, open, expandable) {
+    const el = document.createElement('span');
+    el.className = 'tw' + (expandable ? '' : ' leaf');
+    el.textContent = open ? '▼' : '▶';
+    if (expandable) el.addEventListener('click', e => {
+      e.stopPropagation();
+      const set = id[0] === 'L' ? state.collapsed : state.expanded;
+      set.has(id) ? set.delete(id) : set.add(id);
+      renderLayers();
+    });
+    return el;
+  }
+
+  function nameSpan(text, onRename) {
+    const el = document.createElement('span');
+    el.className = 'lname';
+    el.textContent = text;
+    if (onRename) el.addEventListener('dblclick', e => {
+      e.stopPropagation();
+      const inp = document.createElement('input');
+      inp.value = text;
+      el.textContent = '';
+      el.appendChild(inp);
+      inp.focus();
+      inp.select();
+      let done = false;
+      const finish = keep => {
+        if (done) return;
+        done = true;
+        if (keep) onRename(inp.value); else renderLayers();
+      };
+      inp.addEventListener('blur', () => finish(true));
+      inp.addEventListener('keydown', ev => {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') finish(true);
+        else if (ev.key === 'Escape') finish(false);
+      });
+    });
+    return el;
+  }
+
+  function layerRowEl(l) {
+    const row = document.createElement('div');
+    row.className = 'lrow layerrow';
+    row.dataset.kind = 'layer';
+    row.dataset.layer = l.id;
+    row.dataset.drag = '1';
+    const open = !state.collapsed.has(l.id);
+    row.appendChild(twistySpan(l.id, open, l.rows.length > 0));
+    const eye = iconSpan('eye', l.visible, [ICON.eyeOn, ICON.eyeOff], 'Toggle layer visibility');
+    eye.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => { const t = C.layerOf(d, l.id); if (t) t.visible = !t.visible; });
+    });
+    const lk = iconSpan('lk', l.locked, [ICON.lockOn, ICON.lockOff], 'Toggle layer lock');
+    lk.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => { const t = C.layerOf(d, l.id); if (t) t.locked = !t.locked; });
+    });
+    row.append(eye, lk, nameSpan(l.name, v => mutate(d => C.renameLayer(d, l.id, v))));
+    return row;
+  }
+
+  function objRowEl(r, depth) {
+    const row = document.createElement('div');
+    row.className = 'lrow objrow';
+    row.dataset.kind = 'obj';
+    row.dataset.layer = r.layer;
+    row.dataset.ids = r.ids.join(',');
+    row.dataset.front = r.ids[0];
+    row.dataset.back = r.ids[r.ids.length - 1];
+    row.dataset.drag = depth === 1 ? '1' : '0'; // only whole units leave a layer
+    row.style.paddingLeft = 6 + depth * 12 + 'px';
+    row.appendChild(twistySpan(r.id, state.expanded.has(r.id), r.children.length > 0));
+    const eye = iconSpan('eye', r.visible, [ICON.eyeOn, ICON.eyeOff], 'Toggle visibility');
+    eye.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => C.hideShapes(d, r.ids, r.visible));
+    });
+    const lk = iconSpan('lk', r.locked, [ICON.lockOn, ICON.lockOff], 'Toggle lock');
+    lk.addEventListener('click', e => {
+      e.stopPropagation();
+      mutate(d => C.lockShapes(d, r.ids, !r.locked));
+    });
+    row.append(eye, lk);
+    if (r.kind === 'shape') {
+      const sh = state.doc.shapes.find(s => s.id === r.id);
+      const sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = (sh && (sh.fill || (sh.stroke && sh.stroke.color))) || 'transparent';
+      row.appendChild(sw);
+    }
+    row.appendChild(nameSpan(r.name));
+    return row;
   }
 
   function renderLayers() {
-    const ul = $('#layerlist');
-    ul.innerHTML = '';
-    for (const l of state.doc.layers) {
-      const li = document.createElement('li');
-      const eye = document.createElement('span');
-      eye.className = 'eye' + (l.visible ? ' on' : '');
-      eye.textContent = l.visible ? '◉' : '○';
-      eye.title = 'Toggle visibility';
-      eye.addEventListener('click', () => mutate(d => {
-        const dl = d.layers.find(x => x.id === l.id);
-        if (dl) dl.visible = !dl.visible;
-      }));
-      const name = document.createElement('span');
-      name.className = 'lname';
-      name.textContent = l.name;
-      li.append(eye, name);
-      ul.appendChild(li);
+    const list = $('#layerlist');
+    const top = list.scrollTop;
+    list.querySelectorAll('.lrow').forEach(el => el.remove());
+    const frag = document.createDocumentFragment();
+    const addRows = (rows, depth) => {
+      for (const r of rows) {
+        frag.appendChild(objRowEl(r, depth));
+        if (r.children.length && state.expanded.has(r.id)) addRows(r.children, depth + 1);
+      }
+    };
+    for (const l of C.layerTree(state.doc)) {
+      frag.appendChild(layerRowEl(l));
+      if (!state.collapsed.has(l.id)) addRows(l.rows, 1);
     }
+    list.appendChild(frag);
+    list.scrollTop = top;
+    $('#lb-del').disabled = state.doc.layers.length < 2;
+    markLayerRows();
   }
+
+  // Cheap two-way sync: canvas selection just repaints the row highlights.
+  function markLayerRows() {
+    document.querySelectorAll('#layerlist .lrow').forEach(el => {
+      if (el.dataset.kind === 'layer') {
+        el.classList.toggle('sel', el.dataset.layer === state.layer);
+      } else {
+        const ids = el.dataset.ids.split(',');
+        el.classList.toggle('sel', ids.every(id => state.sel.has(id)));
+      }
+    });
+  }
+
+  function doAddLayer() {
+    mutate(d => {
+      const l = C.addLayer(d, null, state.layer);
+      state.layer = l.id;
+    });
+  }
+  function doDuplicateLayer() {
+    mutate(d => {
+      const l = C.duplicateLayer(d, state.layer);
+      if (l) state.layer = l.id;
+    });
+  }
+  function doDeleteLayer() {
+    if (state.doc.layers.length < 2) return;
+    mutate(d => C.deleteLayer(d, state.layer));
+  }
+  $('#lb-new').addEventListener('click', doAddLayer);
+  $('#lb-dup').addEventListener('click', doDuplicateLayer);
+  $('#lb-del').addEventListener('click', doDeleteLayer);
+
+  // ---------- layers panel drag & drop ----------
+  // Pointer-driven (not HTML5 DnD) so it behaves the same as the canvas drags.
+  let ldrag = null;
+
+  function dropTargetAt(clientY) {
+    const rows = [...document.querySelectorAll('#layerlist .lrow')];
+    for (const row of rows) {
+      const r = row.getBoundingClientRect();
+      if (clientY < r.bottom) return { row, before: clientY < r.top + r.height / 2 };
+    }
+    const last = rows[rows.length - 1];
+    return last ? { row: last, before: false } : null;
+  }
+
+  function showDropLine(t) {
+    const dl = $('#dropline'), list = $('#layerlist');
+    if (!t) { dl.style.display = 'none'; return; }
+    const lr = list.getBoundingClientRect(), r = t.row.getBoundingClientRect();
+    dl.style.display = 'block';
+    dl.style.top = (t.before ? r.top : r.bottom) - lr.top + list.scrollTop - 1 + 'px';
+  }
+
+  function dropLayer(src, t) {
+    const from = C.layerIndex(state.doc, src.dataset.layer);
+    // Every layer row that starts above the drop line stays above the dragged
+    // one, so the count of them is the insertion index.
+    const r = t.row.getBoundingClientRect();
+    const y = t.before ? r.top : r.bottom;
+    let ins = 0;
+    document.querySelectorAll('#layerlist .lrow[data-kind="layer"]').forEach(el => {
+      if (el.getBoundingClientRect().top < y) ins++;
+    });
+    const to = ins > from ? ins - 1 : ins;
+    if (from < 0 || to === from) return;
+    mutate(d => C.reorderLayers(d, from, to));
+  }
+
+  function dropObject(src, t) {
+    const ids = src.dataset.ids.split(',');
+    if (t.row === src || (t.row.dataset.ids || '').split(',').some(id => ids.includes(id))) return;
+    if (t.row.dataset.kind === 'layer') {
+      mutate(d => C.moveShapesToLayer(d, ids, t.row.dataset.layer));
+      state.layer = t.row.dataset.layer;
+    } else {
+      const anchor = t.before ? t.row.dataset.front : t.row.dataset.back;
+      mutate(d => C.moveShapesToLayer(d, ids, t.row.dataset.layer, anchor, t.before ? 'front' : 'back'));
+      state.layer = t.row.dataset.layer;
+    }
+    markLayerRows();
+  }
+
+  // Row activation happens on pointerup so a drag never doubles as a click.
+  function activateRow(row) {
+    if (row.dataset.kind === 'layer') {
+      state.layer = row.dataset.layer;
+      markLayerRows();
+      return;
+    }
+    const ids = row.dataset.ids.split(',');
+    const locked = ids.every(id => {
+      const s = state.doc.shapes.find(x => x.id === id);
+      return !s || s.locked || s.hidden;
+    });
+    const l = C.layerOf(state.doc, row.dataset.layer);
+    if (locked || !l || l.locked || !l.visible) return;
+    setSel(ids);
+    state.layer = row.dataset.layer;
+    markLayerRows();
+    render();
+  }
+
+  $('#layerlist').addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const row = e.target.closest('.lrow');
+    if (!row || e.target.closest('.eye, .lk, .tw') || e.target.tagName === 'INPUT') return;
+    ldrag = { row, y0: e.clientY, moved: false };
+  });
+  window.addEventListener('pointermove', e => {
+    if (!ldrag) return;
+    if (!ldrag.moved) {
+      if (Math.abs(e.clientY - ldrag.y0) < 4) return;
+      if (ldrag.row.dataset.drag !== '1') { ldrag = null; return; }
+      ldrag.moved = true;
+      ldrag.row.classList.add('dragging');
+    }
+    showDropLine(dropTargetAt(e.clientY));
+  });
+  window.addEventListener('pointerup', e => {
+    if (!ldrag) return;
+    const d = ldrag;
+    ldrag = null;
+    d.row.classList.remove('dragging');
+    showDropLine(null);
+    if (!d.moved) { activateRow(d.row); return; }
+    const t = dropTargetAt(e.clientY);
+    if (!t) return;
+    if (d.row.dataset.kind === 'layer') dropLayer(d.row, t);
+    else dropObject(d.row, t);
+  });
 
   // ---------- menus ----------
   const MENUS = {
@@ -2520,6 +3264,10 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
       { label: 'Bring Forward', kbd: '⌘]', run: () => doArrange('forward'), enabled: () => state.sel.size > 0 },
       { label: 'Send Backward', kbd: '⌘[', run: () => doArrange('backward'), enabled: () => state.sel.size > 0 },
       { label: 'Send to Back', kbd: '⇧⌘[', run: () => doArrange('back'), enabled: () => state.sel.size > 0 },
+      { label: 'Lock Selection', kbd: '⌘2', run: () => doLock(), enabled: () => state.sel.size > 0 },
+      { label: 'Unlock All', kbd: '⌥⌘2', run: () => doUnlockAll(), enabled: () => state.doc.shapes.some(s => s.locked) },
+      { label: 'Hide Selection', kbd: '⌘3', run: () => doHide(), enabled: () => state.sel.size > 0 },
+      { label: 'Show All', kbd: '⌥⌘3', run: () => doShowAll(), enabled: () => state.doc.shapes.some(s => s.hidden) },
     ],
   };
 
@@ -2531,10 +3279,24 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     return selShapes().some(s => s.group);
   }
   function selectAll() {
-    const ok = selectableLayers();
-    setSel(state.doc.shapes.filter(s => ok.has(s.layer)).map(s => s.id));
+    setSel(selectableShapes().map(s => s.id));
     render();
   }
+  // Illustrator drops the selection once it goes out of reach.
+  function doLock() {
+    if (!state.sel.size) return;
+    mutate(d => C.lockShapes(d, [...state.sel], true));
+    state.sel.clear();
+    render();
+  }
+  function doHide() {
+    if (!state.sel.size) return;
+    mutate(d => C.hideShapes(d, [...state.sel], true));
+    state.sel.clear();
+    render();
+  }
+  function doUnlockAll() { mutate(d => C.unlockAll(d)); }
+  function doShowAll() { mutate(d => C.showAll(d)); }
   function doGroup() {
     if (selUnitCount() < 2) return;
     mutate(d => C.groupShapes(d, [...state.sel]));
@@ -2747,6 +3509,7 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
         let da = Math.atan2(wy - d.cy, wx - d.cx) - d.a0;
         if (e.shiftKey) da = Math.round(da / (Math.PI / 4)) * (Math.PI / 4);
         d.moved = true;
+        d.da = da;
         applyDragMatrix(C.mRotate(da, d.cx, d.cy));
         render();
       } else if (d.kind === 'marquee') {
@@ -2781,16 +3544,21 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
       const [ax, ay] = C.s2w(v, Math.min(d.m0[0], d.m1[0]), Math.min(d.m0[1], d.m1[1]));
       const [bx, by] = C.s2w(v, Math.max(d.m0[0], d.m1[0]), Math.max(d.m0[1], d.m1[1]));
       const rect = { x: ax, y: ay, w: bx - ax, h: by - ay };
-      const ok = selectableLayers();
-      const ids = state.doc.shapes
-        .filter(s => ok.has(s.layer))
+      const ids = selectableShapes()
         .filter(s => { const b = C.tightBBox(s.cmds); return b && C.rectsIntersect(b, rect); })
         .map(s => s.id);
       setSel(d.shift ? [...state.sel, ...ids] : ids);
       render();
     } else if (d.moved) {
+      // keep the Transform panel's rotate readout in step with handle drags
+      if (d.kind === 'rotate' && d.da) {
+        const deg = d.da / C.DEG;
+        for (const s of state.doc.shapes) {
+          if (state.sel.has(s.id)) s.angle = C.normAngle((s.angle || 0) + deg);
+        }
+      }
       commitNow();
-      render();
+      refreshDoc();
     }
   });
 
@@ -2808,6 +3576,7 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
   window.addEventListener('keydown', e => {
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
+    if (e.target.tagName === 'INPUT') return; // panel fields own their keys
     if (e.key === 'Escape') {
       closeMenu();
       if (state.sel.size) { state.sel.clear(); render(); }
@@ -2820,6 +3589,9 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     if (mod && k === 'e') { exportPdfFile(); e.preventDefault(); return; }
     if (mod && k === 'a') { selectAll(); e.preventDefault(); return; }
     if (mod && k === 'g') { e.shiftKey ? doUngroup() : doGroup(); e.preventDefault(); return; }
+    // e.code, because Alt+digit rewrites e.key on some keyboard layouts
+    if (mod && e.code === 'Digit2') { e.altKey ? doUnlockAll() : doLock(); e.preventDefault(); return; }
+    if (mod && e.code === 'Digit3') { e.altKey ? doShowAll() : doHide(); e.preventDefault(); return; }
     if (mod && e.key === ']') { doArrange(e.shiftKey ? 'front' : 'forward'); e.preventDefault(); return; }
     if (mod && e.key === '[') { doArrange(e.shiftKey ? 'back' : 'backward'); e.preventDefault(); return; }
     if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) { doDelete(); e.preventDefault(); return; }
@@ -2872,6 +3644,7 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
   window.addEventListener('resize', resize);
   new ResizeObserver(resize).observe(stagewrap);
   setTool('select');
+  setRef(state.ref);
   renderLayers();
   resize();
 
@@ -2881,6 +3654,8 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
     openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
+    renderLayers, markLayerRows, updateTransform, applyTransformField, setRef,
+    doAddLayer, doDuplicateLayer, doDeleteLayer, doLock, doHide, doUnlockAll, doShowAll,
   };
 })();
 
