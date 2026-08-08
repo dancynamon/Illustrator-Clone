@@ -634,15 +634,24 @@ async function makeColorFromCS(doc, fam, comps) {
     case 'separation': case 'devicen': {
       const tint = comps.length ? comps[0] : 1;
       let rgb = null, values = comps.slice();
+      const altFam = csFamily(doc, fam.alt);
       const out = await evalFunction(doc, fam.tint, comps.length ? comps : [1]);
       if (out) {
-        const altFam = csFamily(doc, fam.alt);
         if (altFam.kind === 'cmyk' && out.length >= 4) rgb = cmyk2rgb(out[0], out[1], out[2], out[3]);
         else if (altFam.kind === 'rgb' && out.length >= 3) rgb = out.slice(0, 3).map(clamp01);
         else if (out.length >= 1) rgb = [clamp01(out[0]), clamp01(out[0]), clamp01(out[0])];
       }
       if (!rgb) { const g = clamp01(1 - tint); rgb = [g, g, g]; } // fallback: tint as darkness
-      return { space: 'separation', name: fam.name, values, rgb };
+      const col = { space: 'separation', name: fam.name, values, rgb };
+      // The ink's own definition is the tint transform at full strength — keep
+      // it so plates can re-emit the separation instead of guessing from RGB.
+      const full = await evalFunction(doc, fam.tint, (comps.length ? comps : [1]).map(() => 1));
+      if (full) {
+        if (altFam.kind === 'cmyk' && full.length >= 4) col.alt = { space: 'cmyk', values: full.slice(0, 4).map(clamp01) };
+        else if (altFam.kind === 'rgb' && full.length >= 3) col.alt = { space: 'rgb', values: full.slice(0, 3).map(clamp01) };
+        else if (full.length >= 1) col.alt = { space: 'gray', values: [clamp01(full[0])] };
+      }
+      return col;
     }
     default: return colGray(0);
   }
@@ -920,7 +929,10 @@ async function parsePDF(input) {
         for (const map of [pagePalette, docPalette]) {
           const cur2 = map.get(key);
           if (cur2) cur2.uses++;
-          else map.set(key, { space: col.space, values: col.values.slice(), rgb: col.rgb.slice(), name: col.name, uses: 1 });
+          else map.set(key, {
+            space: col.space, values: col.values.slice(), rgb: col.rgb.slice(),
+            name: col.name, alt: col.alt || null, uses: 1,
+          });
         }
       }
     }
