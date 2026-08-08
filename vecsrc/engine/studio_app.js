@@ -31,8 +31,11 @@
     tool: 'select',
     space: false,        // spacebar temporary hand
     pan: null,           // {sx,sy,view0} while dragging
-    drag: null,          // select-tool drag state machine
+    drag: null,          // select/direct-tool drag state machine
+    draw: null,          // rect/ellipse rubber band {wx0,wy0,wx1,wy1,square,center}
+    pen: null,           // pen path under construction {anchors,closed,drag,hover,hoverClose}
     sel: new Set(),      // selected shape ids (always group-expanded)
+    asel: new Map(),     // direct tool: shape id -> Set of anchor keys
     autoFit: true,       // keep fitting on resize until the user changes the view
     layer: null,         // active layer id (Layers panel target)
     collapsed: new Set(),// layer ids twisted shut (layers open by default)
@@ -69,6 +72,7 @@
   function setSel(ids) {
     blurPanelField();
     state.sel = new Set(C.expandIds(state.doc, ids));
+    state.asel.clear(); // anchor picks belong to whatever was selected before
   }
   function selShapes() {
     return state.doc.shapes.filter(s => state.sel.has(s.id));
@@ -162,6 +166,7 @@
     const alive = new Set(state.doc.shapes.map(s => s.id));
     state.sel = new Set([...state.sel].filter(id => alive.has(id)));
     if (!C.layerOf(state.doc, state.layer)) state.layer = state.doc.layers[0].id;
+    state.asel.clear(); // anchor indices do not survive a document swap
     renderLayers();
     render();
   }
@@ -179,6 +184,7 @@
   function applyNewDoc(doc) {
     state.doc = doc;
     state.history = C.newHistory(doc);
+    state.pen = state.draw = state.drag = null; // nothing in flight belongs to the new doc
     state.sel.clear();
     state.layer = doc.layers[0].id;
     state.collapsed.clear();
@@ -377,9 +383,102 @@
     updateReadouts();
   }
 
+  // Screen-space path for overlay art (previews, the pen path in flight).
+  function drawWorldPath(cmds) {
+    const v = state.view;
+    drawPath(C.transformCmds(cmds, [v.scale, 0, 0, v.scale, v.tx, v.ty]));
+  }
+
+  function drawAnchor(p, on) {
+    ctx.fillStyle = on ? '#3a8ee6' : '#fff';
+    ctx.fillRect(p[0] - 3, p[1] - 3, 6, 6);
+    ctx.strokeStyle = '#3a8ee6';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(p[0] - 2.5, p[1] - 2.5, 5, 5);
+  }
+  function drawHandle(p, h) {
+    ctx.strokeStyle = '#3a8ee6';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(h[0], h[1]); ctx.stroke();
+    ctx.fillStyle = '#3a8ee6';
+    ctx.beginPath(); ctx.arc(h[0], h[1], 3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Anchors of the selected objects, Ai-style: hollow squares until picked,
+  // handles only on the segments that touch a picked anchor.
+  function drawAnchorOverlay() {
+    const v = state.view;
+    for (const s of selShapes()) {
+      const subs = C.pathToAnchors(s.cmds);
+      const sel = state.asel.get(s.id) || new Set();
+      const live = liveHandleKeys(subs, sel);
+      subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+        const p = C.w2s(v, a.x, a.y);
+        for (const which of ['in', 'out']) {
+          if (a[which] && live.has(C.handleKey(si, ai, which))) {
+            drawHandle(p, C.w2s(v, a[which][0], a[which][1]));
+          }
+        }
+      }));
+      subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+        drawAnchor(C.w2s(v, a.x, a.y), sel.has(C.anchorKey(si, ai)));
+      }));
+    }
+  }
+
+  function drawPenOverlay() {
+    const p = state.pen, v = state.view;
+    if (!p || !p.anchors.length) return;
+    ctx.strokeStyle = '#3a8ee6';
+    ctx.lineWidth = 1;
+    if (p.anchors.length > 1) {
+      drawWorldPath(C.anchorsToPath([{ anchors: p.anchors, closed: p.closed }]));
+      ctx.stroke();
+    }
+    // rubber band from the live anchor to the cursor
+    const last = p.anchors[p.anchors.length - 1];
+    if (p.hover && !p.drag) {
+      const a = C.w2s(v, last.x, last.y);
+      const c1 = last.out ? C.w2s(v, last.out[0], last.out[1]) : a;
+      const b = C.w2s(v, p.hover[0], p.hover[1]);
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.bezierCurveTo(c1[0], c1[1], b[0], b[1], b[0], b[1]);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const a of p.anchors) {
+      const q = C.w2s(v, a.x, a.y);
+      for (const which of ['in', 'out']) {
+        if (a === last && a[which]) drawHandle(q, C.w2s(v, a[which][0], a[which][1]));
+      }
+      drawAnchor(q, a === last);
+    }
+    // close affordance: a ring on the first anchor when the click would close
+    if (p.hoverClose && !p.drag) {
+      const q = C.w2s(v, p.anchors[0].x, p.anchors[0].y);
+      ctx.strokeStyle = '#3a8ee6';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(q[0], q[1], 7, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  function drawShapePreview() {
+    if (!state.draw) return;
+    ctx.save();
+    ctx.strokeStyle = '#3a8ee6';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    drawWorldPath(drawnCmds(state.draw));
+    ctx.stroke();
+    ctx.restore();
+  }
+
   function drawSelectionOverlay() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (state.sel.size) {
+    if (state.sel.size && state.tool !== 'direct') {
       const b = C.shapesBBox(selShapes());
       if (b) {
         const p0 = C.w2s(state.view, b.x, b.y);
@@ -404,8 +503,11 @@
         }
       }
     }
+    if (state.tool === 'direct') drawAnchorOverlay();
+    drawPenOverlay();
+    drawShapePreview();
     const d = state.drag;
-    if (d && d.kind === 'marquee' && d.moved) {
+    if (d && (d.kind === 'marquee' || d.kind === 'amarquee') && d.moved) {
       ctx.strokeStyle = '#3a8ee6';
       ctx.fillStyle = 'rgba(58,142,230,.08)';
       ctx.lineWidth = 1;
@@ -430,7 +532,10 @@
     $('#s-tool').textContent = TOOLS[state.tool];
     // selection readout + align button state
     const selEl = $('#p-sel');
-    if (state.sel.size) {
+    const anchors = anchorSelSize();
+    if (state.tool === 'direct' && anchors) {
+      selEl.textContent = `${anchors} anchor${anchors > 1 ? 's' : ''}`;
+    } else if (state.sel.size) {
       const b = C.shapesBBox(selShapes());
       selEl.textContent = b
         ? `${state.sel.size} obj · ${+(b.w / k).toFixed(2)} × ${+(b.h / k).toFixed(2)} ${state.doc.units}`
@@ -1213,6 +1318,8 @@
   // ---------- tools ----------
   function setTool(t) {
     if (!TOOLS[t]) return;
+    if (state.tool === 'pen' && t !== 'pen') penFinish(false);
+    state.drag = state.draw = null;
     state.tool = t;
     document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
       b.classList.toggle('active', b.dataset.tool === t));
@@ -1222,6 +1329,294 @@
 
   document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
     b.addEventListener('click', () => setTool(b.dataset.tool)));
+
+  // ---------- drawing tools (rect / ellipse / pen) ----------
+  // Ai's default appearance for freshly drawn art. Pen paths come out stroke-
+  // only so an open path reads as a line rather than a white blob.
+  function newFill() { return { fill: '#ffffff', stroke: { color: '#1d1d1b', w: 1 } }; }
+  function newStroke() { return { fill: null, stroke: { color: '#1d1d1b', w: 1 } }; }
+
+  // Screen-pixel pick radius expressed in world units, so tolerances feel the
+  // same at every zoom level.
+  function pickTol(px) { return px / state.view.scale; }
+
+  function addDrawnShape(name, cmds, style) {
+    let id = null;
+    mutate(d => { id = C.addShape(d, { type: 'path', name, ...style, cmds }).id; });
+    setSel([id]);
+    return id;
+  }
+
+  function drawnRect(d) {
+    return C.dragRect(d.wx0, d.wy0, d.wx1, d.wy1, d.square, d.center);
+  }
+  function drawnCmds(d) {
+    const r = drawnRect(d);
+    return d.tool === 'rect'
+      ? C.rectPath(r.x, r.y, r.w, r.h)
+      : C.ellipsePath(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2);
+  }
+
+  function onShapeToolDown(e) {
+    const [wx, wy] = worldPt(e);
+    state.draw = {
+      tool: state.tool, wx0: wx, wy0: wy, wx1: wx, wy1: wy,
+      square: e.shiftKey, center: e.altKey,
+    };
+    canvas.setPointerCapture(e.pointerId);
+  }
+  function onShapeToolMove(e, wx, wy) {
+    const d = state.draw;
+    d.wx1 = wx; d.wy1 = wy;
+    d.square = e.shiftKey; d.center = e.altKey;
+    render();
+  }
+  function onShapeToolUp() {
+    const d = state.draw;
+    state.draw = null;
+    const r = drawnRect(d);
+    // a click (or a hairline drag) draws nothing, like Ai
+    if (r.w * state.view.scale >= 1 && r.h * state.view.scale >= 1) {
+      addDrawnShape(d.tool === 'rect' ? 'Rectangle' : 'Ellipse', drawnCmds(d), newFill());
+    }
+    render();
+  }
+
+  // The pen path lives outside the document until it is finished, so one drawn
+  // path is one undo step.
+  function penSub() { return { anchors: state.pen.anchors, closed: state.pen.closed }; }
+
+  function penFinish(close) {
+    const p = state.pen;
+    state.pen = null;
+    stagewrap.classList.remove('pen-close');
+    if (!p) return;
+    if (close) p.closed = true;
+    if (p.anchors.length >= 2) {
+      addDrawnShape('Path', C.anchorsToPath([{ anchors: p.anchors, closed: p.closed }]), newStroke());
+    }
+    render();
+  }
+
+  function penCancelPoint() {
+    const p = state.pen;
+    if (!p || !p.drag) return false;
+    if (p.drag.isNew) p.anchors.pop();
+    p.drag = null;
+    if (!p.anchors.length) state.pen = null;
+    render();
+    return true;
+  }
+
+  function penCloseTarget(wx, wy) {
+    const p = state.pen;
+    if (!p || p.anchors.length < 2) return false;
+    const a0 = p.anchors[0];
+    return Math.hypot(a0.x - wx, a0.y - wy) <= pickTol(6);
+  }
+
+  function onPenDown(e) {
+    const [wx, wy] = worldPt(e);
+    canvas.setPointerCapture(e.pointerId);
+    const p = state.pen;
+    if (p && penCloseTarget(wx, wy)) {
+      // drag while closing shapes the joining curve through the first anchor
+      p.drag = { idx: 0, isNew: false, closing: true, broke: false };
+      render();
+      return;
+    }
+    if (p && p.anchors.length) {
+      const last = p.anchors[p.anchors.length - 1];
+      if (Math.hypot(last.x - wx, last.y - wy) <= pickTol(6)) {
+        last.out = null; // click the live anchor to make the next segment leave straight
+        render();
+        return;
+      }
+    }
+    if (!p) state.pen = { anchors: [], closed: false, drag: null, hover: null, hoverClose: false };
+    state.pen.anchors.push({ x: wx, y: wy, in: null, out: null });
+    state.pen.drag = { idx: state.pen.anchors.length - 1, isNew: true, closing: false, broke: false };
+    render();
+  }
+
+  function onPenMove(e, wx, wy) {
+    const p = state.pen;
+    if (!p) return;
+    p.hover = [wx, wy];
+    if (p.drag) {
+      // Alt at any point during the drag breaks the pair for good, so the two
+      // handles stay independent even after the key comes back up.
+      p.drag.broke = p.drag.broke || e.altKey;
+      C.moveHandle(penSub(), p.drag.idx, 'out', wx, wy, p.drag.broke ? 'none' : 'full');
+    } else {
+      p.hoverClose = penCloseTarget(wx, wy);
+      stagewrap.classList.toggle('pen-close', p.hoverClose);
+    }
+    render();
+  }
+
+  function onPenUp() {
+    const p = state.pen;
+    if (!p || !p.drag) return;
+    const closing = p.drag.closing;
+    p.drag = null;
+    if (closing) penFinish(true);
+    else render();
+  }
+
+  // ---------- direct selection ----------
+  function anchorSel(id) {
+    let s = state.asel.get(id);
+    if (!s) { s = new Set(); state.asel.set(id, s); }
+    return s;
+  }
+  function anchorSelSize() {
+    let n = 0;
+    for (const s of state.asel.values()) n += s.size;
+    return n;
+  }
+  // Ai shows the handles of every selected anchor plus the neighbouring handle
+  // on each segment that touches one.
+  function liveHandleKeys(subs, sel) {
+    const live = new Set();
+    subs.forEach((sub, si) => {
+      const n = sub.anchors.length;
+      sub.anchors.forEach((a, ai) => {
+        if (!sel.has(C.anchorKey(si, ai))) return;
+        live.add(C.handleKey(si, ai, 'in'));
+        live.add(C.handleKey(si, ai, 'out'));
+        const prev = ai > 0 ? ai - 1 : (sub.closed ? n - 1 : -1);
+        const next = ai < n - 1 ? ai + 1 : (sub.closed ? 0 : -1);
+        if (prev >= 0) live.add(C.handleKey(si, prev, 'out'));
+        if (next >= 0) live.add(C.handleKey(si, next, 'in'));
+      });
+    });
+    return live;
+  }
+
+  function onDirectDown(e) {
+    const [sx, sy] = screenPt(e);
+    const [wx, wy] = worldPt(e);
+    const tol = pickTol(5);
+    canvas.setPointerCapture(e.pointerId);
+
+    // 1) a live handle beats everything — it is drawn on top
+    for (const s of selShapes()) {
+      const subs = C.pathToAnchors(s.cmds);
+      const hh = C.hitAnchorHandle(subs, wx, wy, tol, liveHandleKeys(subs, anchorSel(s.id)));
+      if (!hh) continue;
+      state.drag = { kind: 'handle', id: s.id, subs, ...hh, broke: false, moved: false };
+      return;
+    }
+
+    // 2) an anchor: pick it (shift toggles), then drag every selected anchor
+    for (const s of selShapes()) {
+      const ha = C.hitAnchor(C.pathToAnchors(s.cmds), wx, wy, tol);
+      if (!ha) continue;
+      const key = C.anchorKey(ha.si, ha.ai);
+      const sel = anchorSel(s.id);
+      if (e.shiftKey) {
+        if (sel.has(key)) { sel.delete(key); render(); return; }
+        sel.add(key);
+      } else if (!sel.has(key)) {
+        state.asel.clear();
+        anchorSel(s.id).add(key);
+      }
+      state.drag = { kind: 'anchors', wx0: wx, wy0: wy, snap: snapshotAnchors(), moved: false };
+      render();
+      return;
+    }
+
+    // 3) the path body: select the object and show its anchors, drag moves it
+    const hit = hitAt(wx, wy);
+    if (hit) {
+      if (!state.sel.has(hit.id)) setSel([hit.id]);
+      state.drag = { // no alt-duplicate here — Alt means "break the handle" for this tool
+        kind: 'move', wx0: wx, wy0: wy,
+        alt: false, dupDone: true, orig: snapshotSel(), moved: false,
+      };
+      render();
+      return;
+    }
+
+    // 4) empty space: marquee across every anchor in range
+    state.drag = { kind: 'amarquee', m0: [sx, sy], m1: [sx, sy], shift: e.shiftKey, moved: false };
+  }
+
+  function snapshotAnchors() {
+    const snap = new Map();
+    for (const s of selShapes()) {
+      if (state.asel.has(s.id)) snap.set(s.id, C.pathToAnchors(s.cmds));
+    }
+    return snap;
+  }
+
+  function onAnchorDragMove(d, wx, wy) {
+    const dx = wx - d.wx0, dy = wy - d.wy0;
+    if (!d.moved && Math.hypot(dx, dy) * state.view.scale < 3) return; // click slack
+    d.moved = true;
+    const byId = new Map(state.doc.shapes.map(s => [s.id, s]));
+    for (const [id, subs0] of d.snap) {
+      const s = byId.get(id);
+      if (!s) continue;
+      const subs = JSON.parse(JSON.stringify(subs0)); // always offset from the original
+      for (const key of state.asel.get(id) || []) {
+        const [si, ai] = key.split(':').map(Number);
+        if (subs[si]) C.moveAnchor(subs[si], ai, dx, dy);
+      }
+      s.cmds = C.anchorsToPath(subs);
+    }
+    render();
+  }
+
+  function onHandleDragMove(d, e, wx, wy) {
+    const s = state.doc.shapes.find(x => x.id === d.id);
+    if (!s) return;
+    d.broke = d.broke || e.altKey;
+    d.moved = true;
+    C.moveHandle(d.subs[d.si], d.ai, d.which, wx, wy, d.broke ? 'none' : undefined);
+    s.cmds = C.anchorsToPath(d.subs);
+    render();
+  }
+
+  function finishAnchorMarquee(d) {
+    const v = state.view;
+    const [ax, ay] = C.s2w(v, Math.min(d.m0[0], d.m1[0]), Math.min(d.m0[1], d.m1[1]));
+    const [bx, by] = C.s2w(v, Math.max(d.m0[0], d.m1[0]), Math.max(d.m0[1], d.m1[1]));
+    const rect = { x: ax, y: ay, w: bx - ax, h: by - ay };
+    const ok = selectableLayers();
+    const picked = new Map();
+    for (const s of state.doc.shapes) {
+      if (!ok.has(s.layer)) continue;
+      const keys = C.anchorsInRect(C.pathToAnchors(s.cmds), rect);
+      if (keys.length) picked.set(s.id, new Set(keys));
+    }
+    if (d.shift) {
+      for (const [id, keys] of picked) keys.forEach(k => anchorSel(id).add(k));
+      state.sel = new Set([...state.sel, ...picked.keys()]);
+    } else {
+      state.sel = new Set(picked.keys());
+      state.asel = picked;
+    }
+    render();
+  }
+
+  function doDeleteAnchors() {
+    const drop = [];
+    mutate(d => {
+      for (const [id, keys] of state.asel) {
+        const s = d.shapes.find(x => x.id === id);
+        if (!s || !keys.size) continue;
+        const subs = C.deleteAnchors(C.pathToAnchors(s.cmds), keys);
+        if (subs.length) s.cmds = C.anchorsToPath(subs);
+        else drop.push(id);
+      }
+      if (drop.length) d.shapes = d.shapes.filter(s => !drop.includes(s.id));
+    });
+    drop.forEach(id => state.sel.delete(id));
+    state.asel.clear();
+    render();
+  }
 
   // ---------- pointer: pan / zoom-click ----------
   function panActive(e) {
@@ -1246,7 +1641,11 @@
       render();
       return;
     }
-    if (state.tool !== 'select' || e.button !== 0) return;
+    if (e.button !== 0) return;
+    if (state.tool === 'rect' || state.tool === 'ellipse') { onShapeToolDown(e); return; }
+    if (state.tool === 'pen') { onPenDown(e); return; }
+    if (state.tool === 'direct') { onDirectDown(e); return; }
+    if (state.tool !== 'select') return;
 
     const [sx, sy] = screenPt(e);
     const [wx, wy] = worldPt(e);
@@ -1311,9 +1710,15 @@
     }
     const [sx, sy] = screenPt(e);
     const [wx, wy] = worldPt(e);
+    if (state.draw) onShapeToolMove(e, wx, wy);
+    if (state.tool === 'pen') onPenMove(e, wx, wy);
     const d = state.drag;
     if (d) {
-      if (d.kind === 'move') {
+      if (d.kind === 'handle') {
+        onHandleDragMove(d, e, wx, wy);
+      } else if (d.kind === 'anchors') {
+        onAnchorDragMove(d, wx, wy);
+      } else if (d.kind === 'move') {
         const dx = wx - d.wx0, dy = wy - d.wy0;
         if (!d.moved && Math.hypot(dx, dy) * state.view.scale < 3) { /* click slack */ }
         else {
@@ -1345,7 +1750,7 @@
         d.da = da;
         applyDragMatrix(C.mRotate(da, d.cx, d.cy));
         render();
-      } else if (d.kind === 'marquee') {
+      } else if (d.kind === 'marquee' || d.kind === 'amarquee') {
         d.m1 = [sx, sy];
         d.moved = true;
         render();
@@ -1365,10 +1770,18 @@
       canvas.releasePointerCapture(e.pointerId);
       return;
     }
+    if (state.draw) { onShapeToolUp(); return; }
+    if (state.tool === 'pen') { onPenUp(); return; }
     const d = state.drag;
     if (!d) return;
     state.drag = null;
-    if (d.kind === 'marquee') {
+    if (d.kind === 'amarquee') {
+      if (!d.moved) {
+        if (!d.shift) { state.sel.clear(); state.asel.clear(); render(); }
+        return;
+      }
+      finishAnchorMarquee(d);
+    } else if (d.kind === 'marquee') {
       if (!d.moved) {
         if (!d.shift) { state.sel.clear(); render(); }
         return;
@@ -1415,9 +1828,17 @@
     if (inField && !mod) return;
     if (e.key === 'Escape') {
       closeMenu();
-      if (state.sel.size) { state.sel.clear(); render(); }
+      if (state.draw) { state.draw = null; render(); return; }
+      if (state.pen) {
+        // mid-drag Escape throws away the point being placed; otherwise it
+        // ends the path and keeps what is drawn so far
+        if (!penCancelPoint()) penFinish(false);
+        return;
+      }
+      if (state.sel.size || state.asel.size) { state.sel.clear(); state.asel.clear(); render(); }
       return;
     }
+    if (e.key === 'Enter' && state.pen) { penFinish(false); e.preventDefault(); return; }
     if (mod && (k === 'y' || (e.shiftKey && k === 'z'))) { doRedo(); e.preventDefault(); return; }
     if (mod && k === 'z') { doUndo(); e.preventDefault(); return; }
     if (mod && k === 's') { saveFile(); e.preventDefault(); return; }
@@ -1430,7 +1851,11 @@
     if (mod && e.code === 'Digit3') { e.altKey ? doShowAll() : doHide(); e.preventDefault(); return; }
     if (mod && e.key === ']') { doArrange(e.shiftKey ? 'front' : 'forward'); e.preventDefault(); return; }
     if (mod && e.key === '[') { doArrange(e.shiftKey ? 'back' : 'backward'); e.preventDefault(); return; }
-    if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) { doDelete(); e.preventDefault(); return; }
+    if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) {
+      anchorSelSize() ? doDeleteAnchors() : doDelete();
+      e.preventDefault();
+      return;
+    }
     if (!mod && e.key.startsWith('Arrow') && state.sel.size) {
       const step = e.shiftKey ? 10 : 1;
       nudge(
@@ -1500,5 +1925,6 @@
     doAddLayer, doDuplicateLayer, doDeleteLayer, doLock, doHide, doUnlockAll, doShowAll,
     setTarget, pushColor, pushOpacity, swapPaints, defaultPaints,
     applyStroke, applySwatch, addCurrentSwatch, renameSwatchAt,
+    penFinish, doDeleteAnchors,
   };
 })();
