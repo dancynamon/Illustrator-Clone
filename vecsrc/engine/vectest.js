@@ -74,6 +74,142 @@ function near(a, b, eps = 1e-9) { return Math.abs(a - b) <= eps; }
   ok(C.pathBBox([['Z']]) === null, 'pathBBox empty');
 }
 
+// ---- drag rect (shift / alt rules) ----
+{
+  const r = C.dragRect(10, 20, 40, 60);
+  ok(near(r.x, 10) && near(r.y, 20) && near(r.w, 30) && near(r.h, 40), 'dragRect plain');
+  const back = C.dragRect(40, 60, 10, 20);
+  ok(near(back.x, 10) && near(back.y, 20) && near(back.w, 30) && near(back.h, 40), 'dragRect normalises reverse drag');
+  const sq = C.dragRect(10, 20, 40, 60, true);
+  ok(near(sq.x, 10) && near(sq.y, 20) && near(sq.w, 40) && near(sq.h, 40), 'dragRect square takes larger axis');
+  const sqUp = C.dragRect(100, 100, 80, 40, true);
+  ok(near(sqUp.x, 40) && near(sqUp.y, 40) && near(sqUp.w, 60) && near(sqUp.h, 60), 'dragRect square follows drag direction');
+  const ctr = C.dragRect(50, 50, 70, 60, false, true);
+  ok(near(ctr.x, 30) && near(ctr.y, 40) && near(ctr.w, 40) && near(ctr.h, 20), 'dragRect from center');
+  const both = C.dragRect(50, 50, 70, 60, true, true);
+  ok(near(both.x, 30) && near(both.y, 30) && near(both.w, 40) && near(both.h, 40), 'dragRect square from center');
+  const nil = C.dragRect(5, 5, 5, 5);
+  ok(near(nil.w, 0) && near(nil.h, 0), 'dragRect zero drag');
+}
+
+// ---- anchor model ----
+{
+  const round = cmds => C.anchorsToPath(C.pathToAnchors(cmds));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const rect = C.rectPath(10, 20, 100, 50);
+  ok(same(round(rect), rect), 'anchors roundtrip: rect');
+  const rr = C.rectPath(0, 0, 100, 50, 10);
+  ok(same(round(rr), rr), 'anchors roundtrip: rounded rect');
+  const el = C.ellipsePath(50, 60, 30, 20);
+  ok(same(round(el), el), 'anchors roundtrip: ellipse');
+  const st = C.starPath(0, 0, 100, 40, 5);
+  ok(same(round(st), st), 'anchors roundtrip: star');
+  const open = [['M', 0, 0], ['C', 10, -20, 40, -20, 50, 0], ['L', 80, 0]];
+  ok(same(round(open), open), 'anchors roundtrip: open mixed path');
+  const two = [...C.rectPath(0, 0, 10, 10), ...C.ellipsePath(50, 50, 5, 5)];
+  ok(same(round(two), two), 'anchors roundtrip: two subpaths');
+}
+{
+  const subs = C.pathToAnchors(C.rectPath(0, 0, 10, 10));
+  ok(subs.length === 1 && subs[0].closed && subs[0].anchors.length === 4, 'rect is 4 closed anchors');
+  ok(subs[0].anchors.every(a => !a.in && !a.out), 'rect anchors are corners');
+  const el = C.pathToAnchors(C.ellipsePath(0, 0, 10, 10))[0];
+  ok(el.closed && el.anchors.length === 4, 'ellipse folds its closing curve into 4 anchors');
+  ok(el.anchors.every(a => a.in && a.out), 'ellipse anchors carry both handles');
+  const openSub = C.pathToAnchors([['M', 0, 0], ['L', 10, 0]])[0];
+  ok(!openSub.closed && openSub.anchors.length === 2, 'open path stays open');
+  ok(C.pathToAnchors([['L', 1, 1]]).length === 0, 'commands before any M are ignored');
+}
+{
+  // moveAnchor carries the handles with the point
+  const sub = C.pathToAnchors(C.ellipsePath(0, 0, 10, 10))[0];
+  const a = sub.anchors[0];
+  const inBefore = a.in.slice(), outBefore = a.out.slice();
+  C.moveAnchor(sub, 0, 5, -3);
+  ok(near(a.x, 15) && near(a.y, -3), 'moveAnchor moves the point');
+  ok(near(a.in[0], inBefore[0] + 5) && near(a.in[1], inBefore[1] - 3)
+    && near(a.out[0], outBefore[0] + 5) && near(a.out[1], outBefore[1] - 3), 'moveAnchor carries handles');
+}
+{
+  ok(C.isSmoothAnchor(C.pathToAnchors(C.ellipsePath(0, 0, 10, 10))[0].anchors[1]), 'ellipse anchor is smooth');
+  ok(!C.isSmoothAnchor(C.pathToAnchors(C.rectPath(0, 0, 10, 10))[0].anchors[0]), 'rect corner is not smooth');
+  ok(!C.isSmoothAnchor({ x: 0, y: 0, in: [-1, 0], out: [0, 1] }), 'perpendicular handles are not smooth');
+  ok(C.isSmoothAnchor({ x: 0, y: 0, in: [-1, 0], out: [3, 0] }), 'unequal but collinear handles are smooth');
+}
+{
+  // mirror modes
+  const mk = () => ({ anchors: [{ x: 0, y: 0, in: [-10, 0], out: [4, 0] }] });
+  const full = mk();
+  C.moveHandle(full, 0, 'out', 0, 6, 'full');
+  ok(near(full.anchors[0].in[0], 0) && near(full.anchors[0].in[1], -6), 'moveHandle full reflects');
+  const ang = mk();
+  C.moveHandle(ang, 0, 'out', 0, 6, 'angle');
+  ok(near(ang.anchors[0].in[0], 0) && near(ang.anchors[0].in[1], -10), 'moveHandle angle keeps opposite length');
+  const none = mk();
+  C.moveHandle(none, 0, 'out', 0, 6, 'none');
+  ok(near(none.anchors[0].in[0], -10) && near(none.anchors[0].in[1], 0), 'moveHandle none breaks symmetry');
+  const auto = mk(); // collinear pair → smooth → angle
+  C.moveHandle(auto, 0, 'out', 0, 6);
+  ok(near(auto.anchors[0].in[1], -10), 'moveHandle default swings a smooth pair');
+  const corner = { anchors: [{ x: 0, y: 0, in: [-10, 0], out: [0, 4] }] };
+  C.moveHandle(corner, 0, 'out', 6, 0);
+  ok(near(corner.anchors[0].in[0], -10) && near(corner.anchors[0].in[1], 0), 'moveHandle default leaves a corner alone');
+  const grow = { anchors: [{ x: 0, y: 0, in: null, out: null }] };
+  C.moveHandle(grow, 0, 'out', 3, 4, 'full');
+  ok(grow.anchors[0].in && near(grow.anchors[0].in[0], -3) && near(grow.anchors[0].in[1], -4), 'moveHandle full creates the mirror');
+}
+{
+  // delete + re-stitch
+  const subs = C.pathToAnchors(C.rectPath(0, 0, 10, 10));
+  const left = C.deleteAnchors(subs, new Set([C.anchorKey(0, 1)]));
+  ok(left.length === 1 && left[0].anchors.length === 3 && left[0].closed, 'deleteAnchors re-stitches a closed path');
+  const cmds = C.anchorsToPath(left);
+  ok(cmds.map(c => c[0]).join() === 'M,L,L,Z', 'restitched triangle emits M,L,L,Z');
+  const gone = C.deleteAnchors(subs, new Set([0, 1, 2].map(i => C.anchorKey(0, i))));
+  ok(gone.length === 0, 'subpath under two anchors is dropped');
+  const two = C.pathToAnchors([...C.rectPath(0, 0, 10, 10), ...C.rectPath(50, 0, 10, 10)]);
+  const kept = C.deleteAnchors(two, new Set([C.anchorKey(1, 0)]));
+  ok(kept.length === 2 && kept[0].anchors.length === 4 && kept[1].anchors.length === 3,
+    'deleteAnchors indexes by subpath');
+  const curve = C.pathToAnchors(C.ellipsePath(0, 0, 10, 10));
+  const cut = C.deleteAnchors(curve, new Set([C.anchorKey(0, 1)]));
+  ok(cut[0].anchors[0].out && cut[0].anchors[1].in, 'neighbour handles survive the re-stitch');
+}
+{
+  // hit testing anchors and handles
+  const subs = C.pathToAnchors(C.rectPath(0, 0, 100, 50));
+  ok(!C.hitAnchor(subs, 50, 25, 4), 'hitAnchor misses mid-shape');
+  const h = C.hitAnchor(subs, 99, 1, 4);
+  ok(h && h.si === 0 && h.ai === 1, 'hitAnchor finds the nearest corner');
+  const el = C.pathToAnchors(C.ellipsePath(0, 0, 10, 10));
+  const a1 = el[0].anchors[1];
+  const hh = C.hitAnchorHandle(el, a1.out[0], a1.out[1], 1);
+  ok(hh && hh.ai === 1 && hh.which === 'out', 'hitAnchorHandle finds a handle');
+  ok(C.hitAnchorHandle(el, a1.out[0], a1.out[1], 1, new Set()) === null, 'live filter hides handles');
+  const live = new Set([C.handleKey(0, 1, 'out')]);
+  ok(C.hitAnchorHandle(el, a1.out[0], a1.out[1], 1, live), 'live filter admits its own handle');
+  ok(C.hitAnchorHandle(el, a1.in[0], a1.in[1], 1, live) === null, 'live filter is per side');
+}
+{
+  const subs = C.pathToAnchors(C.rectPath(0, 0, 100, 50));
+  const all = C.anchorsInRect(subs, { x: -5, y: -5, w: 200, h: 200 });
+  ok(all.length === 4, 'anchorsInRect catches every anchor');
+  const top = C.anchorsInRect(subs, { x: -5, y: -5, w: 200, h: 10 });
+  ok(top.length === 2 && top[0] === C.anchorKey(0, 0) && top[1] === C.anchorKey(0, 1), 'anchorsInRect selects the top edge');
+  ok(C.anchorsInRect(subs, { x: 200, y: 200, w: 10, h: 10 }).length === 0, 'anchorsInRect empty away from the path');
+}
+{
+  // a doc edited through the anchor model still serializes and hit-tests
+  const d = C.newDoc();
+  const s = C.addShape(d, { type: 'path', fill: '#123456', cmds: C.rectPath(0, 0, 100, 100) });
+  const subs = C.pathToAnchors(s.cmds);
+  C.moveAnchor(subs[0], 2, 40, 40);
+  s.cmds = C.anchorsToPath(subs);
+  const d2 = C.parseDoc(C.serializeDoc(d));
+  ok(JSON.stringify(d2.shapes[0].cmds) === JSON.stringify(s.cmds), 'edited path survives serialization');
+  ok(C.hitTestShape(d2.shapes[0], 120, 120), 'moved anchor extends the filled area');
+}
+
 // ---- demo doc ----
 {
   const d = C.demoDoc();

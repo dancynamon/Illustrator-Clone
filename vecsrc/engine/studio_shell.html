@@ -83,6 +83,10 @@
   #stagewrap.tool-hand #stage { cursor: grab; }
   #stagewrap.tool-hand.panning #stage { cursor: grabbing; }
   #stagewrap.tool-zoom #stage { cursor: zoom-in; }
+  #stagewrap.tool-pen #stage,
+  #stagewrap.tool-rect #stage,
+  #stagewrap.tool-ellipse #stage { cursor: crosshair; }
+  #stagewrap.tool-pen.pen-close #stage { cursor: pointer; } /* click closes the path */
 
   /* ---- right panels ---- */
   #panels {

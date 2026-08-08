@@ -103,6 +103,22 @@ const VECCORE = (() => {
     return cmds;
   }
 
+  // Rect from a rubber-band drag: (ax,ay) is where the pointer went down.
+  // square constrains to the larger axis, fromCenter grows both ways from the
+  // anchor — the Shift/Alt rules the rectangle and ellipse tools share.
+  function dragRect(ax, ay, bx, by, square = false, fromCenter = false) {
+    let dx = bx - ax, dy = by - ay;
+    if (square) {
+      const s = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = dx < 0 ? -s : s;
+      dy = dy < 0 ? -s : s;
+    }
+    if (fromCenter) {
+      return { x: ax - Math.abs(dx), y: ay - Math.abs(dy), w: Math.abs(dx) * 2, h: Math.abs(dy) * 2 };
+    }
+    return { x: Math.min(ax, ax + dx), y: Math.min(ay, ay + dy), w: Math.abs(dx), h: Math.abs(dy) };
+  }
+
   // Bounding box over all coordinates in the command list (control points
   // included — conservative for curves, exact for the shapes above).
   function pathBBox(cmds) {
@@ -117,6 +133,154 @@ const VECCORE = (() => {
     }
     if (x0 === Infinity) return null;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  // ---------- anchor model (path editing) ----------
+  // The editable view of a command list: subpaths of anchors, Illustrator-style.
+  // subpath = {anchors:[{x,y,in:[x,y]|null,out:[x,y]|null}], closed}
+  // Handles are absolute points so they transform like anything else. Every
+  // path this app can build survives pathToAnchors → anchorsToPath unchanged.
+  const HANDLE_SIDES = ['in', 'out'];
+  const ANCHOR_EPS = 1e-9;
+
+  function anchorKey(si, ai) { return si + ':' + ai; }
+  function handleKey(si, ai, which) { return si + ':' + ai + ':' + which; }
+
+  function pathToAnchors(cmds) {
+    const subs = [];
+    let cur = null;
+    for (const c of cmds) {
+      if (c[0] === 'M') {
+        cur = { anchors: [{ x: c[1], y: c[2], in: null, out: null }], closed: false };
+        subs.push(cur);
+      } else if (!cur) {
+        continue;
+      } else if (c[0] === 'L') {
+        cur.anchors.push({ x: c[1], y: c[2], in: null, out: null });
+      } else if (c[0] === 'C') {
+        cur.anchors[cur.anchors.length - 1].out = [c[1], c[2]];
+        cur.anchors.push({ x: c[5], y: c[6], in: [c[3], c[4]], out: null });
+      } else if (c[0] === 'Z') {
+        cur.closed = true;
+        // A closing curve lands back on the start anchor; fold it away so the
+        // ring carries one anchor per corner.
+        const a = cur.anchors;
+        if (a.length > 1) {
+          const last = a[a.length - 1];
+          if (Math.abs(last.x - a[0].x) <= ANCHOR_EPS && Math.abs(last.y - a[0].y) <= ANCHOR_EPS) {
+            a[0].in = last.in;
+            a.pop();
+          }
+        }
+        cur = null;
+      }
+    }
+    return subs;
+  }
+
+  function anchorsToPath(subs) {
+    const cmds = [];
+    for (const sub of subs) {
+      const a = sub.anchors;
+      if (!a.length) continue;
+      cmds.push(['M', a[0].x, a[0].y]);
+      const segs = sub.closed ? a.length : a.length - 1;
+      for (let i = 0; i < segs; i++) {
+        const p = a[i], q = a[(i + 1) % a.length];
+        if (p.out || q.in) {
+          const c1 = p.out || [p.x, p.y], c2 = q.in || [q.x, q.y];
+          cmds.push(['C', c1[0], c1[1], c2[0], c2[1], q.x, q.y]);
+        } else if (!sub.closed || i < segs - 1) {
+          cmds.push(['L', q.x, q.y]); // the straight closing segment is Z's job
+        }
+      }
+      if (sub.closed) cmds.push(['Z']);
+    }
+    return cmds;
+  }
+
+  function moveAnchor(sub, i, dx, dy) {
+    const a = sub.anchors[i];
+    if (!a) return;
+    a.x += dx; a.y += dy;
+    for (const which of HANDLE_SIDES) {
+      if (a[which]) { a[which][0] += dx; a[which][1] += dy; }
+    }
+  }
+
+  // Smooth = both handles present and pointing opposite ways through the point.
+  // This is what decides whether dragging one handle should swing the other.
+  function isSmoothAnchor(a) {
+    if (!a || !a.in || !a.out) return false;
+    const ix = a.in[0] - a.x, iy = a.in[1] - a.y;
+    const ox = a.out[0] - a.x, oy = a.out[1] - a.y;
+    const li = Math.hypot(ix, iy), lo = Math.hypot(ox, oy);
+    if (li < 1e-6 || lo < 1e-6) return false;
+    return (ix * ox + iy * oy) / (li * lo) < -1 + 1e-6;
+  }
+
+  // Drag one handle to (x,y). mirror: 'none' breaks the pair, 'angle' swings
+  // the opposite handle to stay collinear at its own length, 'full' makes it an
+  // exact reflection (and creates it if missing). Default follows smoothness.
+  function moveHandle(sub, i, which, x, y, mirror) {
+    const a = sub.anchors[i];
+    if (!a) return;
+    if (mirror == null) mirror = isSmoothAnchor(a) ? 'angle' : 'none';
+    a[which] = [x, y];
+    if (mirror === 'none') return;
+    const other = which === 'in' ? 'out' : 'in';
+    const dx = a.x - x, dy = a.y - y;
+    if (mirror === 'full') { a[other] = [a.x + dx, a.y + dy]; return; }
+    if (!a[other]) return;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-6) return;
+    const L = Math.hypot(a[other][0] - a.x, a[other][1] - a.y);
+    a[other] = [a.x + dx / d * L, a.y + dy / d * L];
+  }
+
+  // Drop the anchors named in sel (a Set of anchorKey strings) and re-stitch:
+  // the neighbours keep their handles, so the merged segment follows the old
+  // curve. Subpaths left with fewer than two anchors disappear.
+  function deleteAnchors(subs, sel) {
+    const out = [];
+    subs.forEach((sub, si) => {
+      const anchors = sub.anchors.filter((a, ai) => !sel.has(anchorKey(si, ai)));
+      if (anchors.length < 2) return;
+      out.push({ anchors, closed: sub.closed });
+    });
+    return out;
+  }
+
+  // Nearest anchor within tol (world units), or null.
+  function hitAnchor(subs, x, y, tol) {
+    let best = null, bd = tol;
+    subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+      const d = Math.hypot(a.x - x, a.y - y);
+      if (d <= bd) { bd = d; best = { si, ai }; }
+    }));
+    return best;
+  }
+
+  // Nearest handle within tol, limited to the handleKeys in live (null = all).
+  function hitAnchorHandle(subs, x, y, tol, live) {
+    let best = null, bd = tol;
+    subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+      for (const which of HANDLE_SIDES) {
+        if (!a[which]) continue;
+        if (live && !live.has(handleKey(si, ai, which))) continue;
+        const d = Math.hypot(a[which][0] - x, a[which][1] - y);
+        if (d <= bd) { bd = d; best = { si, ai, which }; }
+      }
+    }));
+    return best;
+  }
+
+  function anchorsInRect(subs, r) {
+    const keys = [];
+    subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+      if (a.x >= r.x && a.x <= r.x + r.w && a.y >= r.y && a.y <= r.y + r.h) keys.push(anchorKey(si, ai));
+    }));
+    return keys;
   }
 
   // ---------- affine matrices ----------
@@ -544,7 +708,9 @@ const VECCORE = (() => {
     PT_PER, PX_PER_PT_100, KAPPA,
     newDoc, addShape,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
-    rectPath, ellipsePath, starPath, pathBBox,
+    rectPath, ellipsePath, starPath, dragRect, pathBBox,
+    anchorKey, handleKey, pathToAnchors, anchorsToPath, moveAnchor, isSmoothAnchor,
+    moveHandle, deleteAnchors, hitAnchor, hitAnchorHandle, anchorsInRect,
     mMul, mTranslate, mScale, mRotate, mApply, transformCmds,
     flattenPath, tightBBox, shapesBBox, hitTestShape, rectsIntersect,
     rootGroupOf, expandIds, selectionUnits, groupShapes, ungroupShapes, duplicateShapes,
