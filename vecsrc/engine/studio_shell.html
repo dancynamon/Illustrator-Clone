@@ -198,6 +198,41 @@
   .alignrow button[disabled] { opacity: .35; cursor: default; }
   .alignrow svg { width: 15px; height: 15px; }
 
+  /* separations panel */
+  #inklist { list-style: none; }
+  #inklist li {
+    display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px;
+  }
+  #inklist li:hover { background: #343435; }
+  #inklist li.sel { background: #3d4a5a; }
+  #inklist .eye { cursor: pointer; width: 14px; text-align: center; color: #6a6a6a; }
+  #inklist .eye.on { color: var(--text); }
+  #inklist .chip {
+    width: 12px; height: 12px; border-radius: 2px; border: 1px solid #6a6a6a; flex: none;
+  }
+  #inklist .iname { flex: 1; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #inklist .ibadge {
+    font-size: 9px; letter-spacing: .4px; color: var(--text-dim);
+    border: 1px solid #4a4a4a; border-radius: 2px; padding: 0 3px;
+  }
+  #inklist li.unused .iname { color: #8a7a4a; }
+  #inklist .icount { color: var(--text-dim); font-variant-numeric: tabular-nums; min-width: 22px; text-align: right; }
+  .subrow { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--text-dim); }
+  .subrow .seg { display: flex; gap: 3px; margin-left: auto; }
+  .subrow .seg button {
+    padding: 2px 6px; border: 1px solid #4a4a4a; border-radius: 3px;
+    background: #3a3a3b; color: var(--text); cursor: pointer; font-size: 10px;
+  }
+  .subrow .seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .subrow .seg button[disabled] { opacity: .35; cursor: default; }
+  #preflight { margin-top: 8px; }
+  #preflight .issue {
+    display: flex; gap: 6px; padding: 3px 0; color: var(--text-dim); line-height: 1.35;
+  }
+  #preflight .issue .dot { color: #d8a13a; }
+  #preflight .issue.error .dot { color: #e0604a; }
+  #preflight .issue.ok .dot { color: #6cb33f; }
+
   /* image trace panel */
   .trow { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
   .trow .k { color: var(--text-dim); width: 58px; flex: none; }
@@ -576,6 +611,39 @@
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 3h10M3 8h10M3 13h10"/></svg>
         </button>
       </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Separations</h2>
+    <div class="body">
+      <ul id="inklist"></ul>
+      <div class="subrow">
+        <span>Preview</span>
+        <span class="seg">
+          <button id="ink-all" title="Show every ink (composite)">All inks</button>
+        </span>
+      </div>
+      <div class="subrow">
+        <span>Overprint</span>
+        <span class="seg">
+          <button data-op="on" title="Selected objects overprint">On</button>
+          <button data-op="off" title="Selected objects knock out">Off</button>
+          <button data-op="auto" title="Inherit the plate default">Auto</button>
+        </span>
+      </div>
+      <div class="pbtns">
+        <button id="ink-rename" title="Rename the selected ink">Rename</button>
+        <button id="ink-convert" title="Convert between spot and process">→ Spot</button>
+      </div>
+      <div class="pbtns">
+        <button id="ink-merge" title="Merge the selected ink into another">Merge…</button>
+        <button id="ink-delete" title="Delete an unused ink">Delete</button>
+      </div>
+      <div class="pbtns">
+        <button id="ink-preflight" title="Check the document before plating">Preflight</button>
+        <button id="ink-plates" title="Export one PDF per ink">Export Plates</button>
+      </div>
+      <div id="preflight"></div>
     </div>
   </div>
   <div class="panel">

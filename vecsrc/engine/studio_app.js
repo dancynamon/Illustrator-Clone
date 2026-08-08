@@ -4,6 +4,7 @@
   'use strict';
   const C = window.VECCORE;
   const TR = window.VECTRACE;
+  const SEP = window.SEPARATE;
   const $ = s => document.querySelector(s);
 
   const stagewrap = $('#stagewrap');
@@ -54,6 +55,9 @@
       result: null,      // {shapeId, r, bw, bh} — paths in traced-bitmap pixels
       note: '', lastId: null, timer: 0,
     },
+    inkVisible: null,    // null = composite; Set of ink keys = separation preview
+    inkSel: null,        // ink key the Separations panel acts on
+    issues: null,        // last preflight result (null until run)
   };
   state.history = C.newHistory(state.doc);
   state.layer = state.doc.layers[0].id;
@@ -175,6 +179,7 @@
     if (!C.layerOf(state.doc, state.layer)) state.layer = state.doc.layers[0].id;
     state.asel.clear(); // anchor indices do not survive a document swap
     renderLayers();
+    renderSeparations();
     render();
   }
 
@@ -197,6 +202,9 @@
     state.collapsed.clear();
     state.expanded.clear();
     state.autoFit = true;
+    state.inkVisible = null;
+    state.inkSel = null;
+    state.issues = null;
     scheduleAutosave();
     fitArtboard();
     refreshDoc();
@@ -403,9 +411,10 @@
   // size, which only shows on open or dashed paths; closed shapes, where
   // alignment actually matters, are exact. The current path on entry is the
   // shape's, left there by the fill pass.
-  function strokeShape(s) {
+  // colorOverride carries the separation-preview ink color when one is active.
+  function strokeShape(s, colorOverride) {
     const st = s.stroke;
-    ctx.strokeStyle = st.color;
+    ctx.strokeStyle = colorOverride || st.color;
     ctx.lineWidth = st.w;
     ctx.lineCap = C.strokeProp(st, 'cap');
     ctx.lineJoin = C.strokeProp(st, 'join');
@@ -455,13 +464,17 @@
     ctx.beginPath(); ctx.rect(ax, ay, aw, ah); ctx.clip(); // clip to artboard like Ai preview
     ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * v.tx, dpr * v.ty);
     const hidden = new Set(state.doc.layers.filter(l => !l.visible).map(l => l.id));
+    const inks = state.inkVisible; // separation preview: repaint per visible ink
     for (const s of state.doc.shapes) {
       if (hidden.has(s.layer) || s.hidden) continue;
+      const fill = s.fill && (inks ? SEP.previewHex(s.fill, s.fillInfo, inks) : s.fill);
+      const stroke = s.stroke && (inks ? SEP.previewHex(s.stroke.color, s.strokeInfo, inks) : s.stroke.color);
+      if (inks && !fill && !stroke) continue; // lays down no visible ink
       ctx.globalAlpha = s.opacity != null ? s.opacity : 1;
       if (s.type === 'image') { drawImageShape(s, v.scale); continue; }
       drawPath(s.cmds);
-      if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
-      if (s.stroke) strokeShape(s);
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) strokeShape(s, stroke);
     }
     drawTracePreview();
     ctx.restore();
@@ -636,6 +649,7 @@
     } else {
       selEl.textContent = '—';
     }
+    syncOverprintButtons();
     const units = selUnitCount();
     document.querySelectorAll('.alignrow button[data-align]').forEach(btn => {
       const dist = btn.dataset.align === 'hdist' || btn.dataset.align === 'vdist';
@@ -1475,6 +1489,227 @@
     applyPreset(tr.preset);
   }
 
+  // ---------- separations ----------
+  function docInks() { return SEP.documentInks(state.doc); }
+
+  function selectedInk() {
+    return state.inkSel ? docInks().find(i => i.key === state.inkSel) || null : null;
+  }
+
+  function setInkVisible(keys) { // null = composite preview
+    state.inkVisible = keys;
+    renderSeparations();
+    render();
+  }
+
+  function toggleInk(key) {
+    const all = docInks().map(i => i.key);
+    const vis = new Set(state.inkVisible || all);
+    if (vis.has(key)) vis.delete(key); else vis.add(key);
+    setInkVisible(vis.size === all.length ? null : vis);
+  }
+
+  function renderSeparations() {
+    const ul = $('#inklist');
+    if (!ul) return;
+    const inks = docInks();
+    if (state.inkSel && !inks.some(i => i.key === state.inkSel)) state.inkSel = null;
+    ul.innerHTML = '';
+    for (const ink of inks) {
+      const on = !state.inkVisible || state.inkVisible.has(ink.key);
+      const li = document.createElement('li');
+      li.className = (ink.key === state.inkSel ? 'sel ' : '') + (ink.objects ? '' : 'unused');
+      const eye = document.createElement('span');
+      eye.className = 'eye' + (on ? ' on' : '');
+      eye.textContent = on ? '◉' : '○';
+      eye.title = 'Separation preview: show only the inks you leave on';
+      eye.addEventListener('click', () => toggleInk(ink.key));
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.style.background = SEP.cmykToHex(ink.cmyk);
+      const name = document.createElement('span');
+      name.className = 'iname';
+      name.textContent = ink.name;
+      name.title = ink.name + ' — ' + ink.objects + ' object' + (ink.objects === 1 ? '' : 's');
+      name.addEventListener('click', () => {
+        state.inkSel = state.inkSel === ink.key ? null : ink.key;
+        renderSeparations();
+      });
+      const badge = document.createElement('span');
+      badge.className = 'ibadge';
+      badge.textContent = ink.type === 'spot' ? 'SPOT' : 'PROC';
+      const count = document.createElement('span');
+      count.className = 'icount';
+      count.textContent = ink.objects;
+      li.append(eye, chip, name, badge, count);
+      ul.appendChild(li);
+    }
+    if (!inks.length) {
+      const li = document.createElement('li');
+      li.textContent = 'No printable artwork';
+      li.style.color = 'var(--text-dim)';
+      ul.appendChild(li);
+    }
+
+    const ink = selectedInk();
+    $('#ink-all').classList.toggle('on', !state.inkVisible);
+    $('#ink-rename').disabled = !ink || ink.type !== 'spot';
+    $('#ink-merge').disabled = !ink || inks.length < 2;
+    $('#ink-delete').disabled = !ink || ink.type !== 'spot' || ink.objects > 0;
+    const conv = $('#ink-convert');
+    conv.textContent = ink && ink.type === 'spot' ? '→ Process' : '→ Spot';
+    conv.disabled = !ink || ink.objects === 0;
+    $('#ink-plates').disabled = !inks.some(i => i.objects > 0);
+    syncOverprintButtons();
+    renderPreflight();
+  }
+
+  // The overprint segment acts on the selection, so it follows selection
+  // changes (render) as well as document changes (renderSeparations).
+  function syncOverprintButtons() {
+    const shapes = selShapes();
+    const on = shapes.length && shapes.every(s => s.overprint === true);
+    const off = shapes.length && shapes.every(s => s.overprint === false);
+    document.querySelectorAll('.subrow button[data-op]').forEach(b => {
+      b.disabled = !state.sel.size;
+      b.classList.toggle('on', shapes.length > 0 &&
+        (b.dataset.op === 'on' ? on : b.dataset.op === 'off' ? off : !on && !off));
+    });
+  }
+
+  function renderPreflight() {
+    const box = $('#preflight');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!state.issues) return;
+    if (!state.issues.length) {
+      box.appendChild(issueRow('ok', 'No preflight problems found.'));
+      return;
+    }
+    for (const it of state.issues) box.appendChild(issueRow(it.level, it.message, it.ids));
+  }
+
+  function issueRow(level, message, ids) {
+    const div = document.createElement('div');
+    div.className = 'issue' + (level === 'error' ? ' error' : level === 'ok' ? ' ok' : '');
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.textContent = level === 'ok' ? '✓' : '▲';
+    const txt = document.createElement('span');
+    txt.textContent = message;
+    if (ids && ids.length) { // click an issue to select what it is about
+      txt.style.cursor = 'pointer';
+      txt.title = 'Select the affected objects';
+      txt.addEventListener('click', () => { setSel(ids); render(); });
+    }
+    div.append(dot, txt);
+    return div;
+  }
+
+  function doPreflight() {
+    state.issues = SEP.preflight(state.doc);
+    renderPreflight();
+    return state.issues;
+  }
+
+  function setSelOverprint(mode) {
+    if (!state.sel.size) return;
+    mutate(d => SEP.setOverprint(d, [...state.sel], mode === 'auto' ? null : mode === 'on'));
+  }
+
+  function doRenameInk() {
+    const ink = selectedInk();
+    if (!ink || ink.type !== 'spot') return;
+    const nm = window.prompt('Rename ink "' + ink.name + '" to:', ink.name);
+    if (!nm || !nm.trim() || nm.trim() === ink.name) return;
+    mutate(d => SEP.renameInk(d, ink.key, nm.trim()));
+    state.inkSel = SEP.inkKey(nm);
+    renderSeparations();
+  }
+
+  function doConvertInk() {
+    const ink = selectedInk();
+    if (!ink || !ink.objects) return;
+    if (ink.type === 'spot') {
+      if (!window.confirm('Convert "' + ink.name + '" to a process build? ' +
+        ink.objects + ' object(s) will print on CMYK plates instead of their own.')) return;
+      mutate(d => SEP.convertSpotToProcess(d, ink.key));
+      state.inkSel = null;
+    } else {
+      const nm = window.prompt('New spot ink name for objects printing only in ' + ink.name + ':',
+        ink.name.toUpperCase());
+      if (!nm || !nm.trim()) return;
+      const n = SEP.convertProcessToSpot(C.parseDoc(C.serializeDoc(state.doc)), ink.key, nm.trim());
+      if (!n) {
+        window.alert('No object prints in ' + ink.name + ' alone, so there is nothing to move ' +
+          'onto a spot plate. (Objects that mix it with other process inks stay put.)');
+        return;
+      }
+      mutate(d => SEP.convertProcessToSpot(d, ink.key, nm.trim()));
+      state.inkSel = SEP.inkKey(nm);
+    }
+    renderSeparations();
+  }
+
+  function doMergeInk() {
+    const ink = selectedInk();
+    if (!ink) return;
+    const others = docInks().filter(i => i.key !== ink.key);
+    if (!others.length) return;
+    const nm = window.prompt('Merge "' + ink.name + '" into which ink?\n\n' +
+      others.map(i => '· ' + i.name).join('\n'), others[0].name);
+    if (!nm || !nm.trim()) return;
+    const target = others.find(i => i.key === SEP.inkKey(nm));
+    if (!target) { window.alert('No ink named "' + nm + '" in this document.'); return; }
+    mutate(d => SEP.mergeInks(d, ink.key, target.key));
+    state.inkSel = target.key;
+    renderSeparations();
+  }
+
+  function doDeleteInk() {
+    const ink = selectedInk();
+    if (!ink) return;
+    if (!SEP.deleteInk(C.parseDoc(C.serializeDoc(state.doc)), ink.key)) {
+      window.alert('"' + ink.name + '" is still used by ' + ink.objects +
+        ' object(s), so it cannot be deleted. Merge or convert it first.');
+      return;
+    }
+    mutate(d => SEP.deleteInk(d, ink.key));
+    state.inkSel = null;
+    renderSeparations();
+  }
+
+  // One PDF per ink, downloaded back to back. Preflight warnings are shown
+  // first so nobody plates a job with RGB or hairlines still in it.
+  function exportPlates() {
+    const issues = doPreflight();
+    const blocking = issues.filter(i => i.level === 'error');
+    if (blocking.length) { window.alert('Cannot plate:\n\n' + blocking.map(i => '· ' + i.message).join('\n')); return; }
+    if (issues.length && !window.confirm('Preflight found:\n\n' +
+      issues.map(i => '· ' + i.message).join('\n') + '\n\nExport plates anyway?')) return;
+    let plates;
+    try {
+      plates = PDFIO.exportPlatePDFs(state.doc);
+    } catch (err) {
+      window.alert('Plate export failed: ' + err.message);
+      return;
+    }
+    plates.forEach((p, i) => {
+      setTimeout(() => VecPDF.downloadBytes(p.bytes, p.filename), i * 150);
+    });
+    return plates;
+  }
+
+  $('#ink-all').addEventListener('click', () => setInkVisible(null));
+  $('#ink-rename').addEventListener('click', doRenameInk);
+  $('#ink-convert').addEventListener('click', doConvertInk);
+  $('#ink-merge').addEventListener('click', doMergeInk);
+  $('#ink-delete').addEventListener('click', doDeleteInk);
+  $('#ink-preflight').addEventListener('click', doPreflight);
+  $('#ink-plates').addEventListener('click', exportPlates);
+  document.querySelectorAll('.subrow button[data-op]').forEach(b =>
+    b.addEventListener('click', () => setSelOverprint(b.dataset.op)));
+
   // ---------- menus ----------
   const MENUS = {
     file: [
@@ -1483,6 +1718,8 @@
       { label: 'Place Image…', run: placeImage },
       { label: 'Save', kbd: '⌘S', run: saveFile },
       { label: 'Export PDF', kbd: '⌘E', run: exportPdfFile, enabled: () => state.doc.shapes.length > 0 },
+      { label: 'Export Separation Plates…', kbd: '⇧⌘E', run: exportPlates, enabled: () => state.doc.shapes.length > 0 },
+      { label: 'Preflight', run: doPreflight, enabled: () => state.doc.shapes.length > 0 },
     ],
     edit: [
       { label: 'Undo', kbd: '⌘Z', run: doUndo, enabled: () => C.canUndo(state.history) },
@@ -1500,6 +1737,9 @@
       { label: 'Unlock All', kbd: '⌥⌘2', run: () => doUnlockAll(), enabled: () => state.doc.shapes.some(s => s.locked) },
       { label: 'Hide Selection', kbd: '⌘3', run: () => doHide(), enabled: () => state.sel.size > 0 },
       { label: 'Show All', kbd: '⌥⌘3', run: () => doShowAll(), enabled: () => state.doc.shapes.some(s => s.hidden) },
+      { label: 'Overprint', run: () => setSelOverprint('on'), enabled: () => state.sel.size > 0 },
+      { label: 'Knock Out', run: () => setSelOverprint('off'), enabled: () => state.sel.size > 0 },
+      { label: 'Overprint: Auto', run: () => setSelOverprint('auto'), enabled: () => state.sel.size > 0 },
     ],
   };
 
@@ -2138,7 +2378,7 @@
     if (mod && k === 'z') { doUndo(); e.preventDefault(); return; }
     if (mod && k === 's') { saveFile(); e.preventDefault(); return; }
     if (mod && k === 'o') { openFile(); e.preventDefault(); return; }
-    if (mod && k === 'e') { exportPdfFile(); e.preventDefault(); return; }
+    if (mod && k === 'e') { e.shiftKey ? exportPlates() : exportPdfFile(); e.preventDefault(); return; }
     if (mod && k === 'a') { selectAll(); e.preventDefault(); return; }
     if (mod && k === 'g') { e.shiftKey ? doUngroup() : doGroup(); e.preventDefault(); return; }
     // e.code, because Alt+digit rewrites e.key on some keyboard layouts
@@ -2209,6 +2449,7 @@
   setRef(state.ref);
   bindTrace();
   renderLayers();
+  renderSeparations();
   resize();
 
   // debug handle
@@ -2224,5 +2465,8 @@
     penFinish, doDeleteAnchors,
     placeImage, addPlacedImage, selectedImage, bitmapOf, traceOpts,
     runTracePreview, expandTrace, applyPreset,
+    SEPARATE: SEP, PDFIO, docInks, setInkVisible, toggleInk, renderSeparations,
+    doPreflight, exportPlates, setSelOverprint,
+    doRenameInk, doConvertInk, doMergeInk, doDeleteInk,
   };
 })();

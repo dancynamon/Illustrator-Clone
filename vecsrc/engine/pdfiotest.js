@@ -170,7 +170,7 @@ function cmdBBox(cmds) { return C.tightBBox(cmds); }
     });
 
     const bytes = PDFIO.exportDocPDF(doc);
-    ok(bytes instanceof Uint8Array && String.fromCharCode(...bytes.slice(0, 8)) === '%PDF-1.4',
+    ok(bytes instanceof Uint8Array && /^%PDF-1\.\d$/.test(String.fromCharCode(...bytes.slice(0, 8))),
       'export: produces a PDF');
 
     const re = await VecPDF.parsePDF(bytes);

@@ -1284,6 +1284,9 @@ const VECCORE = (() => {
   function redo(h) { return canRedo(h) ? parseDoc(h.stack[++h.idx]) : null; }
 
   // ---------- demo content (placeholder until real docs/import land) ----------
+  // Carries print color (CMYK builds plus one spot ink) so the separations
+  // panel has real inks to show on a fresh document.
+  const DEMO_SPOT = 'AQUAMENTOR GREEN';
   function demoDoc() {
     const doc = newDoc({ w: 8.5, h: 11, units: 'in' });
     // one spot ink in the palette so the Swatches panel shows a real plate
@@ -1294,18 +1297,22 @@ const VECCORE = (() => {
     const spotCol = swatchColor(spot);
     addShape(doc, {
       type: 'path', name: 'Rounded rect',
-      fill: '#2f6fb3', stroke: null, opacity: 1,
+      fill: '#2f6fb3', fillInfo: { space: 'cmyk', values: [0.74, 0.38, 0, 0.3] },
+      stroke: null, opacity: 1,
       cmds: rectPath(1 * 72, 1 * 72, 3 * 72, 2 * 72, 18),
     });
     addShape(doc, {
       type: 'path', name: 'Spot green circle',
       fill: colorHex(spotCol), fillInfo: colorInfo(spotCol),
-      stroke: { color: '#1d1d1b', w: 1.5 }, opacity: 1,
+      stroke: { color: '#1d1d1b', w: 1.5 },
+      strokeInfo: { space: 'cmyk', values: [0, 0, 0, 0.89] },
+      opacity: 1,
       cmds: ellipsePath(5.5 * 72, 3.4 * 72, 1.2 * 72, 1.2 * 72),
     });
     addShape(doc, {
       type: 'path', name: 'Star',
-      fill: '#e8862e', stroke: null, opacity: 1,
+      fill: '#e8862e', fillInfo: { space: 'cmyk', values: [0, 0.42, 0.8, 0.09] },
+      stroke: null, opacity: 1,
       cmds: starPath(3.4 * 72, 6.6 * 72, 1.5 * 72, 0.62 * 72, 5),
     });
     return doc;

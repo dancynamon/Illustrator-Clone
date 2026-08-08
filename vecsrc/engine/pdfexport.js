@@ -1,13 +1,18 @@
 /*
  * pdfexport.js
  * --------------------
- * Flat vector-PDF writer at artboard size. Takes the same shape model
- * that pdf-import.js produces (top-left origin, y-down, points) and
- * writes a single-page PDF 1.4 with plain path fills/strokes — no
- * layers, no fonts. RGB and grayscale colors are written natively; CMYK
- * colors are preserved as CMYK (k/K); spot inks are written as real
- * /Separation colorspaces when they carry an alternate build, so plates
- * survive the trip. Constant object opacity becomes an /ExtGState.
+ * Vector-PDF writer at artboard size. Takes the same shape model that
+ * pdf-import.js produces (top-left origin, y-down, points) and writes a
+ * single-page PDF 1.5 with plain path fills/strokes — no transparency
+ * groups, no embedded fonts. RGB and grayscale colors are written
+ * natively, CMYK is preserved as CMYK (k/K), and spot colors are written
+ * as real named /Separation color spaces — never flattened to RGB.
+ *
+ * Two writers share the plumbing:
+ *   exportPDF(doc)        flat artboard PDF, everything on one level
+ *   exportPlatePDF(plate) one ink's press plate: a 2-layer OCG document
+ *                         (Color + Spot, house convention) at piece size,
+ *                         with crop/registration marks and an ink label.
  *
  * Browser: window.VecPDF.exportPDF(doc) -> Uint8Array
  * Node:    require('./pdf-export.js').exportPDF(doc)
@@ -21,9 +26,21 @@
  *     strokeWidth,
  *     strokeCap?, strokeJoin?, strokeMiter?, strokeDash?, strokeAlign?,
  *     opacity?,             // 0..1, constant alpha
- *     fillRule: 'nonzero' | 'evenodd'
+ *     fillRule: 'nonzero' | 'evenodd',
+ *     overprint: true | false | undefined
  *   } ],
  *   title?, creator?        // Info dictionary strings
+ * }
+ *
+ * plate = {
+ *   width, height,          // piece (trim) size in points
+ *   ink: { name, cmyk:[c,m,y,k], type:'spot'|'process' },
+ *   colorShapes: [shape],   // Color layer: the art in its own colors
+ *   spotShapes:  [ {subpaths, fillTint, strokeTint, strokeWidth,
+ *                   fillRule, overprint} ],   // Spot layer: the ink itself
+ *   marks?: true,           // crop + registration marks and ink label
+ *   margin?: 36,            // furniture margin in points (0 = piece only)
+ *   title?, label?
  * }
  */
 (function (global) {
@@ -36,49 +53,88 @@ function fmt(n) {
   return s === '-0' ? '0' : s;
 }
 
-// Names in the resource dictionaries have to survive PDF name syntax, so
-// anything outside the safe set is written as #xx (PANTONE 185 C ->
-// PANTONE#20185#20C, which is exactly what Illustrator writes).
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+function rgbToCmyk(rgb) {
+  const k = 1 - Math.max(rgb[0] || 0, rgb[1] || 0, rgb[2] || 0);
+  if (k >= 1 - 1e-4) return [0, 0, 0, 1];
+  const d = 1 - k;
+  return [(1 - rgb[0] - k) / d, (1 - rgb[1] - k) / d, (1 - rgb[2] - k) / d, k].map(clamp01);
+}
+
+// A spot color's alternate space — what a viewer shows for the ink. The ink
+// name and tint are the press truth; this is only the on-screen stand-in.
+function altCmykOf(col) {
+  const a = col.alt;
+  if (a && a.space === 'cmyk' && a.values.length >= 4) return a.values.slice(0, 4).map(clamp01);
+  if (a && a.space === 'rgb' && a.values.length >= 3) return rgbToCmyk(a.values);
+  if (a && a.space === 'gray' && a.values.length >= 1) return [0, 0, 0, clamp01(1 - a.values[0])];
+  return rgbToCmyk(col.rgb || [0, 0, 0]);
+}
+
+// PDF name objects: everything outside the regular character set is #xx.
 function pdfName(s) {
-  return String(s || 'Spot').replace(/[^A-Za-z0-9._-]/g,
-    ch => '#' + ch.charCodeAt(0).toString(16).padStart(2, '0'));
+  return '/' + String(s).replace(/[^!-~]|[#()<>\[\]{}\/%]/g, ch =>
+    '#' + ch.charCodeAt(0).toString(16).padStart(2, '0'));
 }
 
-const ALT_SPACE = { cmyk: 'DeviceCMYK', rgb: 'DeviceRGB', gray: 'DeviceGray' };
+function escapePdfString(s) {
+  return String(s).replace(/[\\()]/g, ch => '\\' + ch).replace(/[^\x20-\x7e]/g, ' ');
+}
 
-// res collects the resources a color/shape needs — separation colorspaces and
-// constant-alpha graphics states — so the page can declare them afterwards.
-function newRes() { return { seps: new Map(), alphas: new Map() }; }
+function strToBytes(s) {
+  const b = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
+  return b;
+}
 
-function sepId(res, col) {
-  if (!col.alt || !ALT_SPACE[col.alt.space] || !Array.isArray(col.alt.values)) return null;
-  const key = col.name + '|' + col.alt.space + '|' + col.alt.values.map(fmt).join(',');
-  let e = res.seps.get(key);
-  if (!e) {
-    e = { id: 'CS' + res.seps.size, name: col.name, alt: col.alt };
-    res.seps.set(key, e);
+/* ---------- page resources ---------- */
+// Content is written before object numbers exist, so colorspaces and
+// graphics states register by resource name here and get their objects
+// allocated at assembly time.
+function newRes() {
+  return { seps: [], sepIdx: new Map(), gs: new Map(), alphaIdx: new Map(), fonts: false };
+}
+
+function sepRes(res, name, cmyk) {
+  const key = name + '|' + cmyk.map(fmt).join(',');
+  let hit = res.sepIdx.get(key);
+  if (!hit) {
+    hit = { res: '/CS' + res.seps.length, ink: name, cmyk };
+    res.sepIdx.set(key, hit);
+    res.seps.push(hit);
   }
-  return e.id;
+  return hit.res;
 }
 
-function alphaId(res, a) {
+// Overprint ('op') leaves the other plates alone; knockout ('ko') clears them.
+function gsRes(res, mode) {
+  const name = mode === 'op' ? '/GSop' : '/GSko';
+  res.gs.set(name, mode === 'op'
+    ? '<< /Type /ExtGState /OP true /op true /OPM 1 >>'
+    : '<< /Type /ExtGState /OP false /op false /OPM 0 >>');
+  return name;
+}
+
+// Constant object alpha. Shares the /ExtGState dict with overprint states.
+function alphaRes(res, a) {
   const key = fmt(a);
-  let id = res.alphas.get(key);
-  if (!id) { id = 'GS' + res.alphas.size; res.alphas.set(key, id); }
-  return id;
+  let name = res.alphaIdx.get(key);
+  if (!name) {
+    name = '/GSa' + res.alphaIdx.size;
+    res.alphaIdx.set(key, name);
+    res.gs.set(name, '<< /Type /ExtGState /ca ' + key + ' /CA ' + key + ' >>');
+  }
+  return name;
 }
 
 function colorOps(col, isStroke, res) {
   if (!col) return '';
   const up = isStroke;
-  if (col.space === 'separation' && res) {
-    // Write the plate as a real /Separation so the ink stays an ink; only an
-    // ink with no usable alternate build falls back to its RGB appearance.
-    const id = sepId(res, col);
-    if (id) {
-      const tint = col.values && col.values.length ? col.values[0] : 1;
-      return '/' + id + (up ? ' CS ' : ' cs ') + fmt(tint) + (up ? ' SCN' : ' scn');
-    }
+  if (col.space === 'separation' && col.name) {
+    const nm = sepRes(res, col.name, altCmykOf(col));
+    const tint = col.values && col.values.length ? clamp01(col.values[0]) : 1;
+    return nm + (up ? ' CS ' : ' cs ') + fmt(tint) + (up ? ' SCN' : ' scn');
   }
   if (col.space === 'cmyk' && col.values && col.values.length === 4) {
     return col.values.map(fmt).join(' ') + (up ? ' K' : ' k');
@@ -110,19 +166,19 @@ function pathOps(subpaths) {
   return out;
 }
 
-function paintOp(shape, fill, stroke) {
+function paintOp(shape) {
   const eo = shape.fillRule === 'evenodd';
-  if (fill && stroke) return eo ? 'B*' : 'B';
-  if (fill) return eo ? 'f*' : 'f';
-  if (stroke) return 'S';
+  if (shape.fill && shape.stroke) return eo ? 'B*' : 'B';
+  if (shape.fill) return eo ? 'f*' : 'f';
+  if (shape.stroke) return 'S';
   return 'n';
 }
 
 const CAP_CODE = { butt: 0, round: 1, square: 2 };
 const JOIN_CODE = { miter: 0, round: 1, bevel: 2 };
 
-function strokeStateOps(shape, res) {
-  const out = [colorOps(shape.stroke, true, res), fmt(shape.strokeWidth || 1) + ' w'];
+function strokeStateOps(shape, res, strokeCol) {
+  const out = [colorOps(strokeCol, true, res), fmt(shape.strokeWidth || 1) + ' w'];
   if (shape.strokeCap && CAP_CODE[shape.strokeCap]) out.push(CAP_CODE[shape.strokeCap] + ' J');
   if (shape.strokeJoin && JOIN_CODE[shape.strokeJoin]) out.push(JOIN_CODE[shape.strokeJoin] + ' j');
   if (shape.strokeMiter > 1) out.push(fmt(shape.strokeMiter) + ' M');
@@ -150,7 +206,7 @@ function subpathsBBox(subpaths) {
 // clipped to the shape (inside) or to everything but the shape (outside) —
 // the same construction Illustrator writes for aligned strokes. Caps and joins
 // come out at that doubled size, which only shows on open or dashed paths.
-function alignedStrokeOps(shape, res) {
+function alignedStrokeOps(shape, res, strokeCol) {
   const align = shape.strokeAlign;
   const lines = ['q'];
   if (align === 'inside') {
@@ -164,9 +220,28 @@ function alignedStrokeOps(shape, res) {
     lines.push(...pathOps(shape.subpaths));
     lines.push('W* n'); // even-odd against the enclosing rect = outside only
   }
-  lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res));
+  lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res, strokeCol));
   lines.push(...pathOps(shape.subpaths));
   lines.push('S', 'Q');
+  return lines;
+}
+
+// One shape, inside its own q/Q so color, alpha and overprint stay local.
+function shapeOps(shape, res, fillCol, strokeCol) {
+  const alpha = shape.opacity == null ? 1 : shape.opacity;
+  const aligned = strokeCol && shape.strokeAlign && shape.strokeAlign !== 'center';
+  const lines = ['q'];
+  if (alpha < 1) lines.push(alphaRes(res, alpha) + ' gs');
+  if (shape.overprint === true) lines.push(gsRes(res, 'op') + ' gs');
+  else if (shape.overprint === false) lines.push(gsRes(res, 'ko') + ' gs');
+  if (fillCol) lines.push(colorOps(fillCol, false, res));
+  if (strokeCol && !aligned) lines.push(...strokeStateOps(shape, res, strokeCol));
+  if (fillCol || !aligned) {
+    lines.push(...pathOps(shape.subpaths));
+    lines.push(paintOp({ fill: fillCol, stroke: strokeCol && !aligned, fillRule: shape.fillRule }));
+  }
+  if (aligned) lines.push(...alignedStrokeOps(shape, res, strokeCol));
+  lines.push('Q');
   return lines;
 }
 
@@ -179,59 +254,70 @@ function buildContent(doc, res) {
   for (const shape of doc.shapes || []) {
     if (!shape || !shape.subpaths || !shape.subpaths.length) continue;
     if (!shape.fill && !shape.stroke) continue;
-    const alpha = shape.opacity == null ? 1 : shape.opacity;
-    const aligned = shape.stroke && shape.strokeAlign && shape.strokeAlign !== 'center';
-    lines.push('q');
-    if (alpha < 1) lines.push('/' + alphaId(res, alpha) + ' gs');
-    if (shape.fill) lines.push(colorOps(shape.fill, false, res));
-    if (shape.stroke && !aligned) lines.push(...strokeStateOps(shape, res));
-    if (shape.fill || !aligned) {
-      lines.push(...pathOps(shape.subpaths));
-      lines.push(paintOp(shape, shape.fill, shape.stroke && !aligned));
-    }
-    if (aligned) lines.push(...alignedStrokeOps(shape, res));
-    lines.push('Q');
+    lines.push(...shapeOps(shape, res, shape.fill, shape.stroke));
   }
   lines.push('Q');
   return lines.join('\n');
 }
 
-// Resource objects for whatever buildContent registered. Returns the
-// /Resources dictionary string plus the objects it points at, numbered from
-// `first`.
-function buildResources(res, first) {
-  const objects = [];
-  let next = first;
-  const cs = [], gs = [];
-  for (const sep of res.seps.values()) {
-    const csNum = next++, fnNum = next++;
-    const zeros = sep.alt.values.map(() => '0').join(' ');
-    const ones = sep.alt.values.map(() => '0 1').join(' ');
-    objects[csNum] = '[/Separation /' + pdfName(sep.name) + ' /' + ALT_SPACE[sep.alt.space] +
-      ' ' + fnNum + ' 0 R]';
-    objects[fnNum] = '<< /FunctionType 2 /Domain [0 1] /C0 [' + zeros + '] /C1 [' +
-      sep.alt.values.map(fmt).join(' ') + '] /N 1 /Range [' + ones + '] >>';
-    cs.push('/' + sep.id + ' ' + csNum + ' 0 R');
-  }
-  for (const [alpha, id] of res.alphas) {
-    const num = next++;
-    objects[num] = '<< /Type /ExtGState /ca ' + alpha + ' /CA ' + alpha + ' >>';
-    gs.push('/' + id + ' ' + num + ' 0 R');
-  }
+/* ---------- low-level file assembly ---------- */
+function newWriter() { return { objs: [null] }; }
+
+function addObj(w, body) { w.objs.push(body); return w.objs.length - 1; }
+
+function ref(n) { return n + ' 0 R'; }
+
+// Allocate the objects the content registered and return the /Resources dict.
+function buildResources(w, res, extra) {
   const parts = [];
-  if (cs.length) parts.push('/ColorSpace << ' + cs.join(' ') + ' >>');
-  if (gs.length) parts.push('/ExtGState << ' + gs.join(' ') + ' >>');
-  return { dict: '<< ' + parts.join(' ') + ' >>', objects, next };
+  if (res.seps.length) {
+    const cs = res.seps.map(s => {
+      const fn = addObj(w, '<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [' +
+        s.cmyk.map(fmt).join(' ') + '] /N 1 >>');
+      const obj = addObj(w, '[/Separation ' + pdfName(s.ink) + ' /DeviceCMYK ' + ref(fn) + ']');
+      return s.res + ' ' + ref(obj);
+    });
+    parts.push('/ColorSpace << ' + cs.join(' ') + ' >>');
+  }
+  if (res.gs.size) {
+    const gs = [...res.gs.entries()].map(([nm, dict]) => nm + ' ' + ref(addObj(w, dict)));
+    parts.push('/ExtGState << ' + gs.join(' ') + ' >>');
+  }
+  if (res.fonts) {
+    const f = addObj(w, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+    parts.push('/Font << /F1 ' + ref(f) + ' >>');
+  }
+  if (extra) parts.push(extra);
+  return '<< ' + parts.join(' ') + ' >>';
 }
 
-function escapePdfString(s) {
-  return String(s).replace(/[\\()]/g, ch => '\\' + ch).replace(/[^\x20-\x7e]/g, ' ');
+// Serialize the object table with a valid xref. Bodies are latin1 strings.
+function assemble(w, trailerExtra) {
+  let out = '%PDF-1.5\n%\xe2\xe3\xcf\xd3\n';
+  const offsets = [0];
+  for (let i = 1; i < w.objs.length; i++) {
+    offsets[i] = out.length;
+    out += i + ' 0 obj\n' + w.objs[i] + '\nendobj\n';
+  }
+  const xrefPos = out.length;
+  out += 'xref\n0 ' + w.objs.length + '\n';
+  out += '0000000000 65535 f \n';
+  for (let i = 1; i < w.objs.length; i++) {
+    out += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
+  }
+  out += 'trailer\n<< /Size ' + w.objs.length + (trailerExtra || '') + ' >>\n';
+  out += 'startxref\n' + xrefPos + '\n%%EOF\n';
+  return strToBytes(out);
 }
 
-function strToBytes(s) {
-  const b = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
-  return b;
+function streamObj(content) {
+  return '<< /Length ' + content.length + ' >>\nstream\n' + content + '\nendstream';
+}
+
+function infoObj(doc) {
+  return '<< /Title (' + escapePdfString(doc.title || 'Untitled') +
+    ') /Creator (' + escapePdfString(doc.creator || 'vecsrc Vector Studio') +
+    ') /Producer (vecsrc pdf-export) >>';
 }
 
 /**
@@ -243,35 +329,169 @@ function exportPDF(doc) {
   }
   const res = newRes();
   const content = buildContent(doc, res);
-  const title = escapePdfString(doc.title || 'Untitled');
-  const creator = escapePdfString(doc.creator || 'vecsrc Vector Studio');
-  const resources = buildResources(res, 6);
 
-  const objects = [];
-  objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
-  objects[2] = '<< /Type /Pages /Kids [3 0 R] /Count 1 >>';
-  objects[3] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' +
-    fmt(doc.width) + ' ' + fmt(doc.height) + '] /Contents 4 0 R /Resources ' + resources.dict + ' >>';
-  objects[4] = '<< /Length ' + content.length + ' >>\nstream\n' + content + '\nendstream';
-  objects[5] = '<< /Title (' + title + ') /Creator (' + creator + ') /Producer (vecsrc pdf-export) >>';
-  for (let i = 6; i < resources.next; i++) objects[i] = resources.objects[i];
+  const w = newWriter();
+  const catalog = addObj(w, '');
+  const pages = addObj(w, '');
+  const page = addObj(w, '');
+  const contents = addObj(w, streamObj(content));
+  const info = addObj(w, infoObj(doc));
+  const resources = buildResources(w, res, null);
 
-  let out = '%PDF-1.4\n%\xe2\xe3\xcf\xd3\n';
-  const offsets = [0];
-  for (let i = 1; i < objects.length; i++) {
-    offsets[i] = out.length;
-    out += i + ' 0 obj\n' + objects[i] + '\nendobj\n';
+  w.objs[catalog] = '<< /Type /Catalog /Pages ' + ref(pages) + ' >>';
+  w.objs[pages] = '<< /Type /Pages /Kids [' + ref(page) + '] /Count 1 >>';
+  w.objs[page] = '<< /Type /Page /Parent ' + ref(pages) + ' /MediaBox [0 0 ' +
+    fmt(doc.width) + ' ' + fmt(doc.height) + '] /Contents ' + ref(contents) +
+    ' /Resources ' + resources + ' >>';
+
+  return assemble(w, ' /Root ' + ref(catalog) + ' /Info ' + ref(info));
+}
+
+/* ---------- prepress furniture ---------- */
+const MARK_GAP = 6;      // clear space between trim and the start of a mark
+const MARK_LEN = 18;     // crop-mark length
+const REG_R = 5;         // registration bullseye radius
+const LABEL_PT = 7;      // ink label type size
+
+function circleOps(cx, cy, r) {
+  const k = 0.5522847498307936 * r;
+  return [
+    fmt(cx + r) + ' ' + fmt(cy) + ' m',
+    fmt(cx + r) + ' ' + fmt(cy + k) + ' ' + fmt(cx + k) + ' ' + fmt(cy + r) + ' ' + fmt(cx) + ' ' + fmt(cy + r) + ' c',
+    fmt(cx - k) + ' ' + fmt(cy + r) + ' ' + fmt(cx - r) + ' ' + fmt(cy + k) + ' ' + fmt(cx - r) + ' ' + fmt(cy) + ' c',
+    fmt(cx - r) + ' ' + fmt(cy - k) + ' ' + fmt(cx - k) + ' ' + fmt(cy - r) + ' ' + fmt(cx) + ' ' + fmt(cy - r) + ' c',
+    fmt(cx + k) + ' ' + fmt(cy - r) + ' ' + fmt(cx + r) + ' ' + fmt(cy - k) + ' ' + fmt(cx + r) + ' ' + fmt(cy) + ' c',
+    'h',
+  ];
+}
+
+function line(x0, y0, x1, y1) {
+  return fmt(x0) + ' ' + fmt(y0) + ' m ' + fmt(x1) + ' ' + fmt(y1) + ' l S';
+}
+
+// Crop marks, registration bullseyes and the ink label — all in the /All
+// registration separation so they image on every plate at full strength.
+function marksContent(plate, res, m, W, H) {
+  const pw = plate.width, ph = plate.height;
+  const reg = { space: 'separation', name: 'All', values: [1], alt: { space: 'cmyk', values: [1, 1, 1, 1] } };
+  const paint = colorOps(reg, false, res);
+  const paintS = colorOps(reg, true, res);
+  const L = ['q', paint, paintS, '0.25 w'];
+
+  // crop marks at the four trim corners
+  for (const y of [m, m + ph]) {
+    L.push(line(m - MARK_GAP - MARK_LEN, y, m - MARK_GAP, y));
+    L.push(line(m + pw + MARK_GAP, y, m + pw + MARK_GAP + MARK_LEN, y));
   }
-  const xrefPos = out.length;
-  out += 'xref\n0 ' + objects.length + '\n';
-  out += '0000000000 65535 f \n';
-  for (let i = 1; i < objects.length; i++) {
-    out += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
+  for (const x of [m, m + pw]) {
+    L.push(line(x, m - MARK_GAP - MARK_LEN, x, m - MARK_GAP));
+    L.push(line(x, m + ph + MARK_GAP, x, m + ph + MARK_GAP + MARK_LEN));
   }
-  out += 'trailer\n<< /Size ' + objects.length + ' /Root 1 0 R /Info 5 0 R >>\n';
-  out += 'startxref\n' + xrefPos + '\n%%EOF\n';
 
-  return strToBytes(out);
+  // registration targets centered in each margin
+  const targets = [
+    [m + pw / 2, m / 2], [m + pw / 2, H - m / 2],
+    [m / 2, m + ph / 2], [W - m / 2, m + ph / 2],
+  ];
+  for (const [cx, cy] of targets) {
+    L.push('0.4 w');
+    L.push(...circleOps(cx, cy, REG_R), 'S');
+    L.push(...circleOps(cx, cy, REG_R * 0.45), 'f');
+    L.push(line(cx - REG_R * 1.8, cy, cx + REG_R * 1.8, cy));
+    L.push(line(cx, cy - REG_R * 1.8, cx, cy + REG_R * 1.8));
+  }
+
+  // ink label along the bottom margin
+  res.fonts = true;
+  // ASCII only: the label is written with WinAnsi Helvetica, and anything
+  // outside that range would come out as a blank on the press proof.
+  const label = plate.label || (plate.ink.name + '  |  ' + (plate.ink.type === 'spot' ? 'SPOT' : 'PROCESS'));
+  const detail = (plate.title ? plate.title + '  |  ' : '') +
+    fmt(pw / 72) + ' x ' + fmt(ph / 72) + ' in';
+  L.push('BT', '/F1 ' + LABEL_PT + ' Tf',
+    '1 0 0 1 ' + fmt(m) + ' ' + fmt(Math.max(3, m / 2 - LABEL_PT)) + ' Tm',
+    '(' + escapePdfString(label) + ') Tj', 'ET');
+  L.push('BT', '/F1 ' + (LABEL_PT - 1.5) + ' Tf',
+    '1 0 0 1 ' + fmt(m) + ' ' + fmt(Math.max(3, m / 2 - LABEL_PT) - LABEL_PT - 1) + ' Tm',
+    '(' + escapePdfString(detail) + ') Tj', 'ET');
+  L.push('Q');
+  return L;
+}
+
+/**
+ * Build one ink's press plate: a 2-layer OCG PDF (Color under, Spot on top)
+ * at piece size, with the artwork that uses the ink and nothing else.
+ * Returns a Uint8Array.
+ */
+function exportPlatePDF(plate) {
+  if (!plate || !(plate.width > 0) || !(plate.height > 0)) {
+    throw new Error('exportPlatePDF: plate.width and plate.height (points) are required');
+  }
+  if (!plate.ink || !plate.ink.name) throw new Error('exportPlatePDF: plate.ink.name is required');
+
+  const marks = plate.marks !== false;
+  const m = marks ? (plate.margin != null ? plate.margin : 36) : 0;
+  const W = plate.width + 2 * m, H = plate.height + 2 * m;
+  const res = newRes();
+  const ink = { name: plate.ink.name, cmyk: (plate.ink.cmyk || [0, 0, 0, 1]).slice(0, 4).map(clamp01) };
+
+  const L = [];
+  L.push('q');
+  // piece space: art coordinates are top-left origin, y-down, inside the trim
+  L.push('1 0 0 -1 ' + fmt(m) + ' ' + fmt(H - m) + ' cm');
+
+  // Color layer first (underneath), in the artwork's own colors.
+  L.push('/OC /oc_color BDC');
+  for (const s of plate.colorShapes || []) {
+    if (!s || !s.subpaths || !s.subpaths.length) continue;
+    if (!s.fill && !s.stroke) continue;
+    L.push(...shapeOps(s, res, s.fill, s.stroke));
+  }
+  L.push('EMC');
+
+  // Spot layer on top: the same geometry as this one ink, overprinting by
+  // default (house convention) so the plate composites instead of erasing.
+  L.push('/OC /oc_spot BDC');
+  L.push(gsRes(res, 'op') + ' gs');
+  const sepCol = t => ({
+    space: 'separation', name: ink.name, values: [t],
+    alt: { space: 'cmyk', values: ink.cmyk },
+  });
+  for (const s of plate.spotShapes || []) {
+    if (!s || !s.subpaths || !s.subpaths.length) continue;
+    const f = s.fillTint != null ? sepCol(s.fillTint) : null;
+    const k = s.strokeTint != null ? sepCol(s.strokeTint) : null;
+    if (!f && !k) continue;
+    L.push(...shapeOps(s, res, f, k));
+  }
+  L.push('EMC');
+  L.push('Q');
+
+  if (marks) L.push(...marksContent({ ...plate, ink: plate.ink }, res, m, W, H));
+
+  const content = L.join('\n');
+
+  const w = newWriter();
+  const catalog = addObj(w, '');
+  const pages = addObj(w, '');
+  const page = addObj(w, '');
+  const contents = addObj(w, streamObj(content));
+  const info = addObj(w, infoObj(plate));
+  const ocColor = addObj(w, '<< /Type /OCG /Name (Color) >>');
+  const ocSpot = addObj(w, '<< /Type /OCG /Name (Spot) >>');
+  const resources = buildResources(w, res,
+    '/Properties << /oc_color ' + ref(ocColor) + ' /oc_spot ' + ref(ocSpot) + ' >>');
+
+  const ocgs = '[' + ref(ocColor) + ' ' + ref(ocSpot) + ']';
+  w.objs[catalog] = '<< /Type /Catalog /Pages ' + ref(pages) +
+    ' /OCProperties << /OCGs ' + ocgs + ' /D << /Order ' + ocgs + ' /ON ' + ocgs + ' >> >> >>';
+  w.objs[pages] = '<< /Type /Pages /Kids [' + ref(page) + '] /Count 1 >>';
+  w.objs[page] = '<< /Type /Page /Parent ' + ref(pages) +
+    ' /MediaBox [0 0 ' + fmt(W) + ' ' + fmt(H) + ']' +
+    ' /TrimBox [' + fmt(m) + ' ' + fmt(m) + ' ' + fmt(m + plate.width) + ' ' + fmt(m + plate.height) + ']' +
+    ' /Contents ' + ref(contents) + ' /Resources ' + resources + ' >>';
+
+  return assemble(w, ' /Root ' + ref(catalog) + ' /Info ' + ref(info));
 }
 
 /**
@@ -279,11 +499,15 @@ function exportPDF(doc) {
  */
 function downloadPDF(doc, filename) {
   const bytes = exportPDF(doc);
+  downloadBytes(bytes, filename || (doc.title ? doc.title + '.pdf' : 'export.pdf'));
+}
+
+function downloadBytes(bytes, filename) {
   const blob = new Blob([bytes], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = filename || (doc.title ? doc.title + '.pdf' : 'export.pdf');
+  a.download = filename || 'export.pdf';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -292,7 +516,9 @@ function downloadPDF(doc, filename) {
 
 const api = global.VecPDF || (global.VecPDF = {});
 api.exportPDF = exportPDF;
+api.exportPlatePDF = exportPlatePDF;
 api.downloadPDF = downloadPDF;
+api.downloadBytes = downloadBytes;
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = api;
