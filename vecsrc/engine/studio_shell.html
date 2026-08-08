@@ -117,6 +117,21 @@
   .alignrow button[disabled] { opacity: .35; cursor: default; }
   .alignrow svg { width: 15px; height: 15px; }
 
+  /* image trace panel */
+  .trow { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .trow .k { color: var(--text-dim); width: 58px; flex: none; }
+  .trow .v { width: 28px; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+  .trow input[type=range] { flex: 1; min-width: 0; height: 14px; accent-color: var(--accent); }
+  .trow select {
+    flex: 1; min-width: 0; font: inherit; padding: 2px 4px; border-radius: 3px;
+    background: #3a3a3b; color: var(--text); border: 1px solid #4a4a4a;
+  }
+  .tcheck { display: flex; align-items: center; gap: 6px; padding: 3px 0; color: var(--text-dim); }
+  .tcheck input { accent-color: var(--accent); }
+  .tstat { color: var(--text-dim); font-size: 11px; margin-top: 6px; min-height: 15px; }
+  #panel-trace.off .trow, #panel-trace.off .tcheck { opacity: .4; }
+  .pbtns button[disabled] { opacity: .35; cursor: default; }
+
   /* layers list */
   #layerlist { list-style: none; }
   #layerlist li {
@@ -191,6 +206,44 @@
         <button id="btn-fit" title="Cmd+0">Fit</button>
         <button id="btn-100" title="Cmd+1">100%</button>
       </div>
+    </div>
+  </div>
+  <div class="panel off" id="panel-trace">
+    <h2>Image Trace</h2>
+    <div class="body">
+      <div class="trow"><span class="k">Preset</span><select id="tr-preset"></select></div>
+      <div class="trow" id="tr-row-colors">
+        <span class="k">Colors</span>
+        <input type="range" id="tr-colors" min="2" max="64" step="1">
+        <span class="v" id="tr-colors-v">6</span>
+      </div>
+      <div class="trow" id="tr-row-threshold">
+        <span class="k">Threshold</span>
+        <input type="range" id="tr-threshold" min="0" max="255" step="1">
+        <span class="v" id="tr-threshold-v">128</span>
+      </div>
+      <div class="trow">
+        <span class="k">Paths</span>
+        <input type="range" id="tr-tolerance" min="0" max="8" step="0.1" title="Path tolerance (px)">
+        <span class="v" id="tr-tolerance-v">1.0</span>
+      </div>
+      <div class="trow">
+        <span class="k">Corners</span>
+        <input type="range" id="tr-corners" min="0" max="100" step="1" title="Higher keeps more hard corners">
+        <span class="v" id="tr-corners-v">70</span>
+      </div>
+      <div class="trow">
+        <span class="k">Noise</span>
+        <input type="range" id="tr-noise" min="1" max="100" step="1" title="Smallest region kept (px)">
+        <span class="v" id="tr-noise-v">5</span>
+      </div>
+      <label class="tcheck"><input type="checkbox" id="tr-ignorewhite"> Ignore White</label>
+      <label class="tcheck"><input type="checkbox" id="tr-preview" checked> Preview</label>
+      <div class="pbtns">
+        <button id="tr-place" title="Place a PNG/JPEG in the document">Place Image…</button>
+        <button id="tr-expand" title="Replace the image with editable paths">Expand</button>
+      </div>
+      <div class="tstat" id="tr-stat">Place an image to trace it.</div>
     </div>
   </div>
   <div class="panel">

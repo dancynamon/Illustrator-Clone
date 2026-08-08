@@ -235,9 +235,10 @@ const VECCORE = (() => {
 
   // Fill hit uses nonzero winding summed across subpaths (canvas default, so
   // holes behave like they render). Stroke hit uses distance to the outline.
+  // Placed images have no fill but are solid over their placement frame.
   function hitTestShape(shape, x, y, tol = 2) {
     const subs = flattenPath(shape.cmds);
-    if (shape.fill != null) {
+    if (shape.fill != null || shape.type === 'image') {
       let wn = 0;
       for (const s of subs) wn += windingNumber(s.pts, x, y);
       if (wn !== 0) return true;
@@ -461,7 +462,13 @@ const VECCORE = (() => {
           if (typeof c[i] !== 'number' || !isFinite(c[i])) throw new Error('bad path coordinate');
         }
       }
-      s.type = 'path';
+      // Placed rasters are ordinary shapes whose cmds are the placement frame,
+      // so every transform/selection path works on them unchanged.
+      s.type = s.type === 'image' ? 'image' : 'path';
+      if (s.type === 'image') {
+        if (typeof s.src !== 'string' || !s.src) throw new Error('bad image source');
+        if (!isFinite(s.iw) || !isFinite(s.ih) || s.iw <= 0 || s.ih <= 0) throw new Error('bad image size');
+      }
       if (!layerIds.has(s.layer)) s.layer = d.layers[0].id;
       if (s.opacity == null || !isFinite(s.opacity)) s.opacity = 1;
       if (s.fill != null && typeof s.fill !== 'string') s.fill = null;

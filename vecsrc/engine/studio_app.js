@@ -3,6 +3,7 @@
 (() => {
   'use strict';
   const C = window.VECCORE;
+  const TR = window.VECTRACE;
   const $ = s => document.querySelector(s);
 
   const stagewrap = $('#stagewrap');
@@ -34,6 +35,12 @@
     drag: null,          // select-tool drag state machine
     sel: new Set(),      // selected shape ids (always group-expanded)
     autoFit: true,       // keep fitting on resize until the user changes the view
+    trace: {             // Image Trace panel controls + last preview result
+      preset: 'color6', colors: 6, threshold: 128, tolerance: 1,
+      corners: 70, noise: 5, ignoreWhite: false, preview: true,
+      result: null,      // {shapeId, r, bw, bh} — paths in traced-bitmap pixels
+      note: '', lastId: null, timer: 0,
+    },
   };
   state.history = C.newHistory(state.doc);
 
@@ -170,7 +177,7 @@
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
-  fileInput.accept = '.aqv,.json,.pdf,.ai,application/json,application/pdf';
+  fileInput.accept = '.aqv,.json,.pdf,.ai,.png,.jpg,.jpeg,.gif,.webp,application/json,application/pdf,image/*';
   fileInput.addEventListener('change', () => {
     const f = fileInput.files[0];
     fileInput.value = '';
@@ -207,15 +214,16 @@
 
   function openAnyFile(f) {
     if (/\.(pdf|ai)$/i.test(f.name) || f.type === 'application/pdf') importPdfFile(f);
+    else if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name) || /^image\//.test(f.type)) placeImageFile(f);
     else openAqvFile(f);
   }
 
-  // drag & drop anywhere: .aqv/.json projects and .pdf/.ai vector imports
+  // drag & drop anywhere: .aqv/.json projects, .pdf/.ai vector imports, rasters
   window.addEventListener('dragover', e => e.preventDefault());
   window.addEventListener('drop', e => {
     e.preventDefault();
     const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f && /\.(aqv|json|pdf|ai)$/i.test(f.name)) openAnyFile(f);
+    if (f && /\.(aqv|json|pdf|ai|png|jpe?g|gif|webp|bmp)$/i.test(f.name)) openAnyFile(f);
   });
 
   function exportPdfFile() {
@@ -230,6 +238,89 @@
     } catch (err) {
       window.alert('Export failed: ' + err.message);
     }
+  }
+
+  // ---------- placed images ----------
+  // A placed raster is an ordinary shape whose cmds are its placement frame,
+  // so move/scale/rotate/z-order/undo all work on it with no special cases.
+  // The pixels live on the shape as a data URL; decoded <img>s are cached here.
+  const MAX_PLACED = 2000;  // stored longest edge — keeps history snapshots sane
+  const imgCache = new Map();
+
+  function imageFor(src) {
+    let im = imgCache.get(src);
+    if (!im) {
+      im = new Image();
+      im.addEventListener('load', () => { render(); scheduleTrace(); });
+      im.src = src;
+      imgCache.set(src, im);
+    }
+    return im;
+  }
+
+  const imgInput = document.createElement('input');
+  imgInput.type = 'file';
+  imgInput.accept = 'image/png,image/jpeg,image/gif,image/webp,image/*';
+  imgInput.addEventListener('change', () => {
+    const f = imgInput.files[0];
+    imgInput.value = '';
+    if (f) placeImageFile(f);
+  });
+  function placeImage() { imgInput.click(); }
+
+  function placeImageFile(f) {
+    const rd = new FileReader();
+    rd.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        const iw = im.naturalWidth, ih = im.naturalHeight;
+        const k = Math.min(1, MAX_PLACED / Math.max(iw, ih));
+        const name = f.name.replace(/\.[a-z0-9]+$/i, '');
+        if (k >= 1) { addPlacedImage(name, rd.result, iw, ih); return; }
+        // oversized source: store a downscaled copy so undo snapshots stay light
+        const w = Math.round(iw * k), h = Math.round(ih * k);
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(im, 0, 0, w, h);
+        const type = /jpe?g$/i.test(f.name) ? 'image/jpeg' : 'image/png';
+        addPlacedImage(name, cv.toDataURL(type, 0.92), w, h);
+      };
+      im.onerror = () => window.alert('Could not read "' + f.name + '" as an image.');
+      im.src = rd.result;
+    };
+    rd.readAsDataURL(f);
+  }
+
+  // Place at 1 source pixel = 1 pt, centered. Oversized art shrinks to fit the
+  // artboard; sprite-sized art scales up so it is big enough to work on.
+  function addPlacedImage(name, src, iw, ih) {
+    const ab = state.doc.artboard;
+    const fit = Math.min(ab.w * 0.9 / iw, ab.h * 0.9 / ih);
+    const k = fit < 1 ? fit : Math.max(1, Math.min(ab.w * 0.6 / iw, ab.h * 0.6 / ih));
+    const w = iw * k, h = ih * k;
+    let shape = null;
+    mutate(d => {
+      shape = C.addShape(d, {
+        type: 'image', name: name || 'Image', src, iw, ih,
+        fill: null, stroke: null, opacity: 1,
+        cmds: C.rectPath((ab.w - w) / 2, (ab.h - h) / 2, w, h),
+      });
+    });
+    setTool('select');
+    setSel([shape.id]);
+    render();
+  }
+
+  function drawImageShape(s, worldScale) {
+    const im = imageFor(s.src);
+    if (!im.complete || !im.naturalWidth) return;
+    const m = TR.placementMatrix(s.cmds, s.iw, s.ih);
+    ctx.save();
+    ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    // magnified rasters go nearest-neighbour so pixel art stays pixel art
+    ctx.imageSmoothingEnabled = Math.hypot(m[0], m[1]) * worldScale < 2;
+    ctx.drawImage(im, 0, 0, s.iw, s.ih);
+    ctx.restore();
   }
 
   // ---------- rendering ----------
@@ -285,10 +376,12 @@
     for (const s of state.doc.shapes) {
       if (hidden.has(s.layer)) continue;
       ctx.globalAlpha = s.opacity != null ? s.opacity : 1;
+      if (s.type === 'image') { drawImageShape(s, v.scale); continue; }
       drawPath(s.cmds);
       if (s.fill) { ctx.fillStyle = s.fill; ctx.fill(); }
       if (s.stroke) { ctx.strokeStyle = s.stroke.color; ctx.lineWidth = s.stroke.w; ctx.stroke(); }
     }
+    drawTracePreview();
     ctx.restore();
 
     // artboard outline on top
@@ -367,6 +460,7 @@
       const dist = btn.dataset.align === 'hdist' || btn.dataset.align === 'vdist';
       btn.disabled = dist ? units < 3 : units < 2;
     });
+    syncTracePanel();
   }
 
   function renderLayers() {
@@ -390,11 +484,212 @@
     }
   }
 
+  // ---------- image trace ----------
+  // All the algorithms live in VECTRACE (pure, no DOM). This layer only turns
+  // the selected placed image into an RGBA bitmap, maps the sliders onto trace
+  // options, paints the preview, and routes Expand through mutate() so it is
+  // one undo step.
+  const PREVIEW_MAX = 420;   // trace this small while dragging sliders
+  const EXPAND_MAX = 2000;
+  const tr = state.trace;
+
+  // Corners slider reads like Illustrator's: 100 = keep every hard corner.
+  function cornerAngleOf(v) { return 165 - v * 1.5; }
+  function cornerSliderOf(deg) { return Math.round((165 - deg) / 1.5); }
+
+  function traceOpts() {
+    return {
+      preset: tr.preset, colors: tr.colors, threshold: tr.threshold,
+      tolerance: tr.tolerance, cornerAngle: cornerAngleOf(tr.corners),
+      minArea: tr.noise, ignoreWhite: tr.ignoreWhite,
+    };
+  }
+
+  function selectedImage() {
+    if (state.sel.size !== 1) return null;
+    const s = state.doc.shapes.find(x => state.sel.has(x.id));
+    return s && s.type === 'image' ? s : null;
+  }
+
+  // Decoded pixels for a placed image, capped to maxDim on the long edge.
+  function bitmapOf(s, maxDim) {
+    const im = imageFor(s.src);
+    if (!im.complete || !im.naturalWidth) return null;
+    const k = Math.min(1, maxDim / Math.max(s.iw, s.ih));
+    const w = Math.max(1, Math.round(s.iw * k)), h = Math.max(1, Math.round(s.ih * k));
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const c2 = cv.getContext('2d', { willReadFrequently: true });
+    c2.imageSmoothingEnabled = k < 1; // never resample at 1:1 — pixel art must stay sharp
+    c2.drawImage(im, 0, 0, w, h);
+    return { w, h, data: c2.getImageData(0, 0, w, h).data };
+  }
+
+  function scheduleTrace() {
+    clearTimeout(tr.timer);
+    tr.timer = setTimeout(runTracePreview, 160);
+  }
+
+  function runTracePreview() {
+    const s = selectedImage();
+    tr.result = null;
+    if (!s || !tr.preview) { updateTraceStat(); render(); return; }
+    const bmp = bitmapOf(s, PREVIEW_MAX);
+    if (!bmp) return; // still decoding — the image load handler reschedules
+    const r = TR.trace(bmp, traceOpts());
+    tr.result = { shapeId: s.id, r, bw: bmp.w, bh: bmp.h };
+    updateTraceStat();
+    render();
+  }
+
+  // Preview paints the traced result over its image, in world space.
+  function drawTracePreview() {
+    const p = tr.result;
+    if (!p) return;
+    const s = state.doc.shapes.find(x => x.id === p.shapeId);
+    if (!s || s.type !== 'image') return;
+    const layer = state.doc.layers.find(l => l.id === s.layer);
+    if (layer && !layer.visible) return;
+    const m = TR.placementMatrix(s.cmds, p.bw, p.bh);
+    ctx.save();
+    ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    ctx.globalAlpha = 1;
+    for (const path of p.r.paths) {
+      drawPath(path.cmds);
+      ctx.fillStyle = path.fill;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function expandTrace() {
+    const s = selectedImage();
+    if (!s) return;
+    const bmp = bitmapOf(s, EXPAND_MAX);
+    if (!bmp) return;
+    const r = TR.trace(bmp, traceOpts());
+    if (!r.paths.length) {
+      window.alert('Trace produced no paths. Try more colors, a lower threshold, or turning off Ignore White.');
+      updateTraceStat();
+      return;
+    }
+    const m = TR.placementMatrix(s.cmds, bmp.w, bmp.h);
+    let ids = [];
+    mutate(d => {
+      const img = d.shapes.find(x => x.id === s.id);
+      const made = TR.expandToShapes(d, r, m, { name: s.name || 'Trace', layer: img ? img.layer : null });
+      ids = made.map(x => x.id);
+      d.shapes = d.shapes.filter(x => x.id !== s.id);
+    });
+    tr.result = null;
+    tr.note = `Expanded ${r.paths.length} paths · ${r.stats.colors} colors · ${r.stats.ms}ms`;
+    setSel(ids);
+    render();
+  }
+
+  function setTraceStat(msg) { $('#tr-stat').textContent = msg; }
+
+  function updateTraceStat() {
+    const s = selectedImage();
+    if (!s) {
+      // the last Expand summary sticks until another image comes into play
+      setTraceStat(tr.note
+        || (state.sel.size ? 'Select a single placed image to trace.' : 'Place an image to trace it.'));
+      return;
+    }
+    tr.note = '';
+    if (!tr.preview) { setTraceStat(`${s.iw}×${s.ih}px · preview off`); return; }
+    const p = tr.result;
+    if (!p) { setTraceStat(`${s.iw}×${s.ih}px · tracing…`); return; }
+    const st = p.r.stats;
+    setTraceStat(`${st.paths} paths · ${st.colors} colors · ${st.points} pts · ${st.ms}ms`
+      + (st.cappedPaths ? ` (${st.cappedPaths} smallest dropped)` : ''));
+  }
+
+  // Panel <-> state. Preset selection resets the sliders to that preset.
+  function applyPreset(key) {
+    const p = TR.PRESETS[key];
+    if (!p) return;
+    const o = TR.options({ preset: key });
+    tr.preset = key;
+    tr.colors = o.colors;
+    tr.threshold = o.threshold;
+    tr.tolerance = o.tolerance;
+    tr.corners = cornerSliderOf(o.cornerAngle);
+    tr.noise = Math.max(1, o.minArea);
+    tr.ignoreWhite = o.ignoreWhite;
+    writeTraceInputs();
+  }
+
+  function writeTraceInputs() {
+    $('#tr-preset').value = tr.preset;
+    $('#tr-colors').value = tr.colors;
+    $('#tr-colors-v').textContent = tr.colors;
+    $('#tr-threshold').value = tr.threshold;
+    $('#tr-threshold-v').textContent = tr.threshold;
+    $('#tr-tolerance').value = tr.tolerance;
+    $('#tr-tolerance-v').textContent = tr.tolerance.toFixed(1);
+    $('#tr-corners').value = tr.corners;
+    $('#tr-corners-v').textContent = tr.corners;
+    $('#tr-noise').value = tr.noise;
+    $('#tr-noise-v').textContent = tr.noise;
+    $('#tr-ignorewhite').checked = tr.ignoreWhite;
+    $('#tr-preview').checked = tr.preview;
+    const mode = TR.options({ preset: tr.preset }).mode;
+    $('#tr-row-threshold').style.display = mode === 'bw' ? '' : 'none';
+    $('#tr-row-colors').style.display = mode === 'bw' ? 'none' : '';
+  }
+
+  // Called from every repaint: keeps the panel in step with the selection and
+  // kicks a fresh preview when the selected image changes.
+  function syncTracePanel() {
+    const s = selectedImage();
+    const id = s ? s.id : null;
+    $('#panel-trace').classList.toggle('off', !s);
+    $('#tr-expand').disabled = !s;
+    document.querySelectorAll('#panel-trace input, #panel-trace select').forEach(el => {
+      if (el.id !== 'tr-preview') el.disabled = !s;
+    });
+    if (id !== tr.lastId) {
+      tr.lastId = id;
+      tr.result = null;
+      updateTraceStat();
+      scheduleTrace();
+    }
+  }
+
+  function bindTrace() {
+    const sel = $('#tr-preset');
+    for (const key of TR.PRESET_ORDER) {
+      const op = document.createElement('option');
+      op.value = key;
+      op.textContent = TR.PRESETS[key].label;
+      sel.appendChild(op);
+    }
+    sel.addEventListener('change', () => { applyPreset(sel.value); scheduleTrace(); });
+    const slider = (id, key, fmt) => $(id).addEventListener('input', e => {
+      tr[key] = +e.target.value;
+      $(id + '-v').textContent = fmt ? fmt(tr[key]) : tr[key];
+      scheduleTrace();
+    });
+    slider('#tr-colors', 'colors');
+    slider('#tr-threshold', 'threshold');
+    slider('#tr-tolerance', 'tolerance', v => v.toFixed(1));
+    slider('#tr-corners', 'corners');
+    slider('#tr-noise', 'noise');
+    $('#tr-ignorewhite').addEventListener('change', e => { tr.ignoreWhite = e.target.checked; scheduleTrace(); });
+    $('#tr-preview').addEventListener('change', e => { tr.preview = e.target.checked; scheduleTrace(); });
+    $('#tr-place').addEventListener('click', placeImage);
+    $('#tr-expand').addEventListener('click', expandTrace);
+    applyPreset(tr.preset);
+  }
+
   // ---------- menus ----------
   const MENUS = {
     file: [
       { label: 'New', run: newFile },
       { label: 'Open…', kbd: '⌘O', run: openFile },
+      { label: 'Place Image…', run: placeImage },
       { label: 'Save', kbd: '⌘S', run: saveFile },
       { label: 'Export PDF', kbd: '⌘E', run: exportPdfFile, enabled: () => state.doc.shapes.length > 0 },
     ],
@@ -762,14 +1057,17 @@
   window.addEventListener('resize', resize);
   new ResizeObserver(resize).observe(stagewrap);
   setTool('select');
+  bindTrace();
   renderLayers();
   resize();
 
   // debug handle
   window.VEC_STUDIO = {
-    state, render, setTool, fitArtboard, VECCORE: C,
+    state, render, setTool, fitArtboard, VECCORE: C, VECTRACE: TR,
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
     openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
+    placeImage, addPlacedImage, selectedImage, bitmapOf, traceOpts,
+    runTracePreview, expandTrace, applyPreset,
   };
 })();
