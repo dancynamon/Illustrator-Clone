@@ -157,6 +157,12 @@ const PDFIO = (() => {
         shape.strokeMiter = C.strokeProp(s.stroke, 'miter');
         shape.strokeAlign = C.strokeProp(s.stroke, 'align');
         if (s.stroke.dash) shape.strokeDash = s.stroke.dash.slice();
+        // An aligned stroke exports as a centered stroke on the real offset
+        // path; the writer only falls back to fattening-and-clipping when the
+        // offset collapses. Offsetting lives in veccore, so it is resolved
+        // here rather than inside the (veccore-free) PDF writer.
+        const off = C.strokeOffsetPath(s.cmds, s.stroke);
+        if (off) shape.strokeOffsetPath = subpathsFromCmds(off);
       }
       out.push(shape);
     }

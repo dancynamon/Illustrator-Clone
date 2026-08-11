@@ -20,6 +20,7 @@
  *     stroke: {space, values, rgb, name?, alt?} | null,
  *     strokeWidth,
  *     strokeCap?, strokeJoin?, strokeMiter?, strokeDash?, strokeAlign?,
+ *     strokeOffsetPath?,    // subpaths an inside/outside stroke rides on
  *     opacity?,             // 0..1, constant alpha
  *     fillRule: 'nonzero' | 'evenodd'
  *   } ],
@@ -146,12 +147,15 @@ function subpathsBBox(subpaths) {
   return x0 === Infinity ? { x: 0, y: 0, w: 0, h: 0 } : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
-// Inside/outside strokes: PDF only centers strokes, so draw at double weight
-// clipped to the shape (inside) or to everything but the shape (outside) —
-// the same construction Illustrator writes for aligned strokes. Caps and joins
-// come out at that doubled size, which only shows on open or dashed paths.
+// Inside/outside strokes: PDF only centers strokes, so an aligned stroke is a
+// centered stroke on shape.strokeOffsetPath — the path pushed half a weight to
+// that side — which keeps caps, joins and dashes at their true size. The clip
+// stays as a backstop against the stroke leaking across the edge where the
+// shape is thinner than the stroke, and carries the whole job when the offset
+// collapsed and there is no offset path to ride.
 function alignedStrokeOps(shape, res) {
   const align = shape.strokeAlign;
+  const off = shape.strokeOffsetPath;
   const lines = ['q'];
   if (align === 'inside') {
     lines.push(...pathOps(shape.subpaths));
@@ -164,8 +168,13 @@ function alignedStrokeOps(shape, res) {
     lines.push(...pathOps(shape.subpaths));
     lines.push('W* n'); // even-odd against the enclosing rect = outside only
   }
-  lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res));
-  lines.push(...pathOps(shape.subpaths));
+  if (off && off.length) {
+    lines.push(...strokeStateOps(shape, res));
+    lines.push(...pathOps(off));
+  } else {
+    lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res));
+    lines.push(...pathOps(shape.subpaths));
+  }
   lines.push('S', 'Q');
   return lines;
 }

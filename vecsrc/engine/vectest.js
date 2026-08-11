@@ -190,6 +190,113 @@ function near(a, b, eps = 1e-9) { return Math.abs(a - b) <= eps; }
   ok(back.shapes.every(s => s.fill == null && s.opacity === 1), 'one undo reverts the whole selection');
 }
 
+// ---- path offsetting ----
+// Distance from every point of an offset back to the source path. A true
+// offset never comes closer than |d|, so this is the property that says the
+// self-intersection loops were pruned rather than left in.
+function minDistToSource(srcCmds, offCmds) {
+  const src = C.flattenAdaptive(srcCmds);
+  let worst = Infinity;
+  for (const o of C.flattenAdaptive(offCmds)) {
+    for (const p of o.pts) {
+      let best = Infinity;
+      for (const s of src) {
+        const n = s.pts.length;
+        for (let i = 0, last = s.closed ? n : n - 1; i < last; i++) {
+          const a = s.pts[i], b = s.pts[(i + 1) % n];
+          const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+          let t = L2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2 : 0;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          best = Math.min(best, Math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]));
+        }
+      }
+      worst = Math.min(worst, best);
+    }
+  }
+  return worst;
+}
+{
+  const rect = C.rectPath(0, 0, 100, 60);
+  const inb = C.tightBBox(C.offsetPath(rect, 10));
+  ok(near(inb.x, 10) && near(inb.y, 10) && near(inb.w, 80) && near(inb.h, 40), 'offset inward insets the rect');
+  const outb = C.tightBBox(C.offsetPath(rect, -10));
+  ok(near(outb.x, -10) && near(outb.y, -10) && near(outb.w, 120) && near(outb.h, 80), 'offset outward outsets it');
+  // winding decides which way is in, so a reversed contour must offset the same
+  const rev = [['M', 0, 60], ['L', 100, 60], ['L', 100, 0], ['L', 0, 0], ['Z']];
+  const revb = C.tightBBox(C.offsetPath(rev, 10));
+  ok(near(revb.x, 10) && near(revb.w, 80) && near(revb.h, 40), 'reversed winding still offsets inward');
+  ok(C.subpathArea(C.flattenAdaptive(rect)[0].pts) > 0, 'rectPath winds positive in y-down space');
+  ok(C.offsetPath(rect, 0).length === rect.length, 'zero offset returns the path');
+  ok(C.offsetPath(rect, 31) === null, 'an inward offset past half the height collapses to nothing');
+  ok(C.offsetPath(rect, 29) !== null, 'an offset that still fits survives');
+  ok(C.offsetPath([['M', 0, 0]], 5) === null, 'offsetting a degenerate path gives nothing');
+}
+{
+  // a circle is the case with a known exact answer
+  const circle = C.ellipsePath(0, 0, 50, 50);
+  for (const [d, want] of [[10, 40], [-10, 60], [49, 1]]) {
+    const r = C.flattenAdaptive(C.offsetPath(circle, d))[0].pts.map(p => Math.hypot(p[0], p[1]));
+    ok(Math.min(...r) > want - 0.05 && Math.max(...r) < want + 0.05,
+      'circle offset by ' + d + ' lands on radius ' + want);
+  }
+}
+{
+  const star = C.starPath(0, 0, 100, 40, 5);
+  for (const d of [8, -8, -25, 30]) {
+    for (const join of ['miter', 'round', 'bevel']) {
+      const off = C.offsetPath(star, d, { join });
+      ok(off && minDistToSource(star, off) > Math.abs(d) - 0.1,
+        'star offset ' + d + ' ' + join + ' keeps every point a full weight off the path');
+    }
+  }
+  // joins only round off where the offset opens a gap: outward at the tips,
+  // inward at the notches — either way round adds points miter and bevel don't
+  ok(C.offsetPath(star, -8, { join: 'round' }).length >
+     C.offsetPath(star, -8, { join: 'bevel' }).length, 'round join adds arc points');
+  ok(C.offsetPath(star, -8, { join: 'miter' }).length ===
+     C.offsetPath(star, -8, { join: 'bevel' }).length, 'miter and bevel each add one point');
+  const spike = C.tightBBox(C.offsetPath(star, -25, { join: 'miter' }));
+  const cut = C.tightBBox(C.offsetPath(star, -25, { join: 'bevel' }));
+  ok(spike.w > cut.w, 'miter runs the sharp tips out past a bevel');
+  const limited = C.tightBBox(C.offsetPath(star, -25, { join: 'miter', miterLimit: 2 }));
+  ok(near(limited.w, cut.w), 'a miter over the limit falls back to a bevel');
+  ok(C.offsetPath(star, 45) === null, 'offsetting a star past its inner radius collapses');
+}
+{
+  // holes wind against the outer contour, so one call has to push both edges
+  // into the material between them
+  const donut = [...C.rectPath(0, 0, 100, 100),
+    ['M', 25, 25], ['L', 25, 75], ['L', 75, 75], ['L', 75, 25], ['Z']];
+  const off = C.offsetPath(donut, 5);
+  const subs = C.flattenAdaptive(off);
+  ok(subs.length === 2, 'both contours offset');
+  const span = pts => {
+    const x = pts.map(p => p[0]);
+    return { x: Math.min(...x), w: Math.max(...x) - Math.min(...x) };
+  };
+  const outer = span(subs[0].pts), hole = span(subs[1].pts);
+  ok(near(outer.x, 5) && near(outer.w, 90), 'the outer contour moves inward');
+  ok(near(hole.x, 20) && near(hole.w, 60), 'the hole grows outward into the same material');
+  ok(minDistToSource(donut, off) > 4.9, 'donut offset stays a full weight off both edges');
+}
+{
+  // an open path has no interior; it still offsets consistently to one side
+  const line = [['M', 0, 0], ['L', 100, 0], ['L', 100, 50]];
+  const off = C.offsetPath(line, 10, { join: 'round' });
+  ok(off && off[0][0] === 'M' && !off.some(c => c[0] === 'Z'), 'an open path offsets to an open path');
+  ok(minDistToSource(line, off) > 9.9, 'open offset keeps its distance');
+}
+{
+  const st = { color: '#000000', w: 6, align: 'inside', join: 'round' };
+  const rect = C.rectPath(0, 0, 100, 60);
+  const b = C.tightBBox(C.strokeOffsetPath(rect, st));
+  ok(near(b.x, 3) && near(b.w, 94), 'strokeOffsetPath rides half a weight inside');
+  const out = C.tightBBox(C.strokeOffsetPath(rect, { ...st, align: 'outside' }));
+  ok(near(out.x, -3) && near(out.w, 106), 'and half a weight outside');
+  ok(C.strokeOffsetPath(rect, { ...st, align: 'center' }) === null, 'a centered stroke needs no offset');
+  ok(C.strokeOffsetPath(rect, { ...st, w: 200 }) === null, 'a stroke wider than the shape has no offset path');
+}
+
 // ---- swatches ----
 {
   const d = C.newDoc();

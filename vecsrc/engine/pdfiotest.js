@@ -210,7 +210,8 @@ function cmdBBox(cmds) { return C.tightBBox(cmds); }
     const raw = Buffer.from(PDFIO.exportDocPDF(doc)).toString('latin1');
     ok(/\n1 J\n/.test(raw) && /\n2 j\n/.test(raw) && /\n4 M\n/.test(raw), 'stroke export: cap/join/miter operators');
     ok(/\n\[6 3\] 0 d\n/.test(raw), 'stroke export: dash pattern');
-    ok(/\nW n\n/.test(raw) && /\n6 w\n/.test(raw), 'stroke export: inside align clips and doubles the weight');
+    ok(/\nW n\n/.test(raw) && /\n3 w\n/.test(raw) && !/\n6 w\n/.test(raw),
+      'stroke export: inside align rides the offset path at its true weight');
     ok(/\/ExtGState/.test(raw) && /\/ca 0\.4/.test(raw), 'stroke export: opacity as an ExtGState');
   }
 

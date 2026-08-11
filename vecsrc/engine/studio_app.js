@@ -285,12 +285,27 @@
     appendPath(cmds);
   }
 
-  // Canvas only centers strokes, so inside/outside draw at double weight and
-  // clip to (or away from) the shape — the same construction the PDF exporter
-  // writes, so preview and print agree. Caps and joins render at that doubled
-  // size, which only shows on open or dashed paths; closed shapes, where
-  // alignment actually matters, are exact. The current path on entry is the
-  // shape's, left there by the fill pass.
+  // Offsetting is the costly part of an aligned stroke, so hold the last
+  // result per shape and redo it only when the geometry — or the stroke that
+  // shaped it — changes. Drags replace s.cmds outright, so identity is enough.
+  const offsetCache = new WeakMap();
+  function alignedPath(s) {
+    const st = s.stroke;
+    const key = C.strokeProp(st, 'align') + '|' + st.w + '|' +
+      C.strokeProp(st, 'join') + '|' + C.strokeProp(st, 'miter');
+    const hit = offsetCache.get(s);
+    if (hit && hit.key === key && hit.cmds === s.cmds) return hit.path;
+    const path = C.strokeOffsetPath(s.cmds, st);
+    offsetCache.set(s, { key, cmds: s.cmds, path });
+    return path;
+  }
+
+  // Canvas only centers strokes. An inside or outside stroke is a centered one
+  // riding the path offset half a weight to that side, which is what keeps
+  // caps, joins and dashes at their true size. The clip stays as a backstop:
+  // it is what stops the stroke leaking across the edge where the shape is
+  // thinner than the stroke, and it covers the case where the offset collapses
+  // altogether. The current path on entry is the shape's, left by the fill pass.
   function strokeShape(s) {
     const st = s.stroke;
     ctx.strokeStyle = st.color;
@@ -302,7 +317,6 @@
     const align = C.strokeProp(st, 'align');
     if (align !== 'center') {
       ctx.save();
-      ctx.lineWidth = st.w * 2;
       if (align === 'inside') {
         ctx.clip();
       } else {
@@ -313,7 +327,9 @@
         appendPath(s.cmds); // even-odd against the enclosing rect = outside only
         ctx.clip('evenodd');
       }
-      drawPath(s.cmds);
+      const off = alignedPath(s);
+      if (off) drawPath(off);
+      else { ctx.lineWidth = st.w * 2; drawPath(s.cmds); } // offset ate the shape
       ctx.stroke();
       ctx.restore();
     } else {

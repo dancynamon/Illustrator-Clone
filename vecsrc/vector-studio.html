@@ -1037,6 +1037,279 @@ const VECCORE = (() => {
     return v == null ? STROKE_DEFAULTS[key] : v;
   }
 
+  // ---------- path offsetting ----------
+  // An aligned stroke is a centered stroke drawn on the path pushed half its
+  // weight to one side, so inside/outside alignment needs a genuine offset
+  // path. Curves are flattened adaptively first: the offset of a cubic is not
+  // a cubic, and the self-intersection pruning below only works on polylines.
+  // OFFSET_TOL is in points, so the result is smooth well past print
+  // resolution no matter how far the shape is zoomed.
+  const OFFSET_TOL = 0.05;
+  const INNER_TRIM_CAP = 20; // how far past |d| an inner corner may reach
+
+  // Split a cubic until the control points sit within tol of the chord.
+  function flatCubic(out, x0, y0, x1, y1, x2, y2, x3, y3, tol, depth) {
+    const dx = x3 - x0, dy = y3 - y0;
+    const len = Math.hypot(dx, dy);
+    const flat = len > 1e-9
+      ? (Math.abs((x1 - x0) * dy - (y1 - y0) * dx) + Math.abs((x2 - x0) * dy - (y2 - y0) * dx)) / len
+      : Math.hypot(x1 - x0, y1 - y0) + Math.hypot(x2 - x0, y2 - y0);
+    if (flat <= tol || depth > 16) { out.push([x3, y3]); return; }
+    const x01 = (x0 + x1) / 2, y01 = (y0 + y1) / 2;
+    const x12 = (x1 + x2) / 2, y12 = (y1 + y2) / 2;
+    const x23 = (x2 + x3) / 2, y23 = (y2 + y3) / 2;
+    const xa = (x01 + x12) / 2, ya = (y01 + y12) / 2;
+    const xb = (x12 + x23) / 2, yb = (y12 + y23) / 2;
+    const xm = (xa + xb) / 2, ym = (ya + yb) / 2;
+    flatCubic(out, x0, y0, x01, y01, xa, ya, xm, ym, tol, depth + 1);
+    flatCubic(out, xm, ym, xb, yb, x23, y23, x3, y3, tol, depth + 1);
+  }
+
+  // Like flattenPath but accuracy-driven rather than fixed-step, and with
+  // duplicate points removed so every segment has a well-defined normal.
+  function flattenAdaptive(cmds, tol = OFFSET_TOL) {
+    const subs = [];
+    let cur = null, sx = 0, sy = 0, px = 0, py = 0;
+    for (const c of cmds) {
+      if (c[0] === 'M') {
+        cur = { pts: [[c[1], c[2]]], closed: false };
+        subs.push(cur);
+        px = sx = c[1]; py = sy = c[2];
+      } else if (!cur) continue;
+      else if (c[0] === 'L') { cur.pts.push([c[1], c[2]]); px = c[1]; py = c[2]; }
+      else if (c[0] === 'C') {
+        flatCubic(cur.pts, px, py, c[1], c[2], c[3], c[4], c[5], c[6], tol, 0);
+        px = c[5]; py = c[6];
+      } else if (c[0] === 'Z') { cur.closed = true; px = sx; py = sy; }
+    }
+    for (const s of subs) {
+      const p = [];
+      for (const q of s.pts) {
+        const last = p[p.length - 1];
+        if (!last || Math.abs(last[0] - q[0]) > 1e-9 || Math.abs(last[1] - q[1]) > 1e-9) p.push(q);
+      }
+      if (s.closed && p.length > 1) {
+        const a = p[0], b = p[p.length - 1];
+        if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) p.pop();
+      }
+      s.pts = p;
+    }
+    return subs.filter(s => s.pts.length > 1);
+  }
+
+  // Shoelace in y-down document space: positive area means the interior lies
+  // along the (-dy, dx) normal, which is the direction offsetPath calls "in".
+  function subpathArea(pts) {
+    let a = 0;
+    for (let i = 0, n = pts.length; i < n; i++) {
+      const p = pts[i], q = pts[(i + 1) % n];
+      a += p[0] * q[1] - q[0] * p[1];
+    }
+    return a / 2;
+  }
+
+  // Where two rays cross, or null when they are parallel.
+  function rayCross(px, py, ux, uy, qx, qy, vx, vy) {
+    const den = ux * vy - uy * vx;
+    if (Math.abs(den) < 1e-12) return null;
+    const t = ((qx - px) * vy - (qy - py) * vx) / den;
+    return [px + ux * t, py + uy * t];
+  }
+
+  // Squared, because pruning calls this hundreds of thousands of times on
+  // heavy artwork and only ever compares it against a fixed limit.
+  function ptSegDist2(x, y, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const L2 = dx * dx + dy * dy;
+    let t = L2 ? ((x - ax) * dx + (y - ay) * dy) / L2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + t * dx - x, ey = ay + t * dy - y;
+    return ex * ex + ey * ey;
+  }
+
+  // Raw offset of one polyline: every segment slides along its normal, and the
+  // gaps that opens at corners are filled with the stroke's own join, so the
+  // corners of an aligned stroke look like the corners of a centered one.
+  function offsetSubpath(pts, closed, d, join, miterLimit, tol) {
+    const n = pts.length;
+    const segs = [];
+    for (let i = 0, last = closed ? n : n - 1; i < last; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const L = Math.hypot(dx, dy);
+      if (L < 1e-9) continue;
+      segs.push({ a, b, ux: dx / L, uy: dy / L, nx: -dy / L, ny: dx / L });
+    }
+    if (!segs.length) return null;
+
+    const out = [];
+    const put = (x, y) => {
+      const p = out[out.length - 1];
+      if (!p || Math.abs(p[0] - x) > 1e-9 || Math.abs(p[1] - y) > 1e-9) out.push([x, y]);
+    };
+    const r = Math.abs(d);
+    const arcStep = r > tol ? Math.max(0.05, 2 * Math.acos(Math.max(-1, 1 - tol / r))) : Math.PI / 2;
+
+    function joinAt(p, prev, cur) {
+      const p0x = p[0] + prev.nx * d, p0y = p[1] + prev.ny * d;
+      const p1x = p[0] + cur.nx * d, p1y = p[1] + cur.ny * d;
+      const cross = prev.ux * cur.uy - prev.uy * cur.ux;
+      const dot = prev.ux * cur.ux + prev.uy * cur.uy;
+      // A turn only needs corner geometry once it opens a gap wider than tol.
+      // Below that one point covers it, which keeps a flattened curve from
+      // paying for a join at every single vertex.
+      if (dot > 0 && r * Math.abs(cross) <= tol) { put(p0x, p0y); return; }
+      // cross * d < 0 means the two offset ends pull apart and the gap is a
+      // real join; otherwise they cross and the corner trims to that crossing.
+      const gap = cross * d < 0;
+      const halfSin = Math.sqrt(Math.max(0, (1 + dot) / 2)); // sin(interior/2)
+      const withinMiter = halfSin > 1e-9 && 1 / halfSin <= miterLimit;
+      if (!gap || (join === 'miter' && withinMiter)) {
+        const ip = rayCross(p0x, p0y, prev.ux, prev.uy, p1x, p1y, cur.ux, cur.uy);
+        if (ip && Math.hypot(ip[0] - p[0], ip[1] - p[1]) <= r * INNER_TRIM_CAP) {
+          put(ip[0], ip[1]);
+          return;
+        }
+      } else if (join === 'round') {
+        const a0 = Math.atan2(p0y - p[1], p0x - p[0]);
+        let da = Math.atan2(p1y - p[1], p1x - p[0]) - a0;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        const steps = Math.max(1, Math.ceil(Math.abs(da) / arcStep));
+        for (let k = 0; k <= steps; k++) {
+          const a = a0 + da * (k / steps);
+          put(p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r);
+        }
+        return;
+      }
+      put(p0x, p0y); put(p1x, p1y); // bevel, over-limit miter, runaway corner
+    }
+
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const prev = i > 0 ? segs[i - 1] : (closed ? segs[segs.length - 1] : null);
+      if (prev) joinAt(s.a, prev, s);
+      else put(s.a[0] + s.nx * d, s.a[1] + s.ny * d);
+      put(s.b[0] + s.nx * d, s.b[1] + s.ny * d);
+    }
+    if (closed && out.length > 1) {
+      const a = out[0], b = out[out.length - 1];
+      if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) out.pop();
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  // Uniform grid over the source segments, so pruning does not have to measure
+  // every offset point against every source segment. Cells are 2·|d| across
+  // and each segment is sampled every half cell, which puts any source within
+  // |d| of a query point in the 3×3 block around that point's own cell.
+  // Segment endpoints live in one flat array and cells key on a packed integer
+  // — pruning runs per offset point, so allocation is what costs here.
+  const GRID_BIAS = 1 << 20;
+
+  function segGrid(subs, cell) {
+    const map = new Map();
+    const xs = [];
+    const put = (key, seg) => {
+      let bucket = map.get(key);
+      if (!bucket) map.set(key, bucket = []);
+      if (bucket[bucket.length - 1] !== seg) bucket.push(seg);
+    };
+    for (const s of subs) {
+      const n = s.pts.length;
+      for (let i = 0, last = s.closed ? n : n - 1; i < last; i++) {
+        const a = s.pts[i], b = s.pts[(i + 1) % n];
+        const seg = xs.length;
+        xs.push(a[0], a[1], b[0], b[1]);
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (cell / 2)));
+        let prev = -1;
+        for (let k = 0; k <= steps; k++) {
+          const t = k / steps;
+          const key = (Math.floor((a[0] + dx * t) / cell) + GRID_BIAS) * 2 * GRID_BIAS +
+            Math.floor((a[1] + dy * t) / cell) + GRID_BIAS;
+          if (key === prev) continue;
+          prev = key;
+          put(key, seg);
+        }
+      }
+    }
+    return { cell, map, xs };
+  }
+
+  function nearSource(grid, x, y, lim2) {
+    const cell = grid.cell, xs = grid.xs;
+    const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+    for (let i = -1; i <= 1; i++) {
+      const row = (cx + i + GRID_BIAS) * 2 * GRID_BIAS;
+      for (let j = -1; j <= 1; j++) {
+        const bucket = grid.map.get(row + cy + j + GRID_BIAS);
+        if (!bucket) continue;
+        for (let k = 0; k < bucket.length; k++) {
+          const o = bucket[k];
+          if (ptSegDist2(x, y, xs[o], xs[o + 1], xs[o + 2], xs[o + 3]) < lim2) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Every point of a true offset sits exactly |d| from the source. Anything
+  // the raw offset put closer than that is inside the swept band — the loops a
+  // corner throws when the offset outruns the local feature size — so drop it
+  // and let the surviving runs bridge straight across the hole they leave.
+  function pruneOffset(raw, closed, grid, lim) {
+    const lim2 = lim * lim;
+    const keep = raw.map(p => !nearSource(grid, p[0], p[1], lim2));
+    if (keep.every(Boolean)) return raw;
+    const start = closed ? Math.max(0, keep.indexOf(false)) : 0;
+    const out = [];
+    for (let i = 0; i < raw.length; i++) {
+      const j = (start + i) % raw.length;
+      if (keep[j]) out.push(raw[j]);
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  // Offset a path by d, positive meaning toward the filled side. Returns M/L/Z
+  // commands, or null when the offset eats the shape entirely (an inside
+  // stroke wider than the shape is thick).
+  function offsetPath(cmds, d, opts = {}) {
+    const tol = opts.tol > 0 ? opts.tol : OFFSET_TOL;
+    const join = STROKE_JOINS[opts.join] ? opts.join : STROKE_DEFAULTS.join;
+    const miterLimit = opts.miterLimit > 1 ? opts.miterLimit : STROKE_DEFAULTS.miter;
+    const subs = flattenAdaptive(cmds, tol);
+    if (!subs.length) return null;
+    if (Math.abs(d) < 1e-9) return cmds.slice();
+    // Winding picks the side; a reversed outer contour flips the whole shape,
+    // while holes wind the other way already and take care of themselves.
+    let area = 0;
+    for (const s of subs) if (s.closed) area += subpathArea(s.pts);
+    const dd = area < 0 ? -d : d;
+    const lim = Math.abs(dd) - Math.max(tol * 2, Math.abs(dd) * 1e-3);
+    const grid = lim > 0 ? segGrid(subs, Math.max(2 * Math.abs(dd), 1e-6)) : null;
+    const out = [];
+    for (const s of subs) {
+      let pts = offsetSubpath(s.pts, s.closed, dd, join, miterLimit, tol);
+      if (pts && grid) pts = pruneOffset(pts, s.closed, grid, lim);
+      if (!pts || pts.length < 2) continue;
+      out.push(['M', pts[0][0], pts[0][1]]);
+      for (let i = 1; i < pts.length; i++) out.push(['L', pts[i][0], pts[i][1]]);
+      if (s.closed) out.push(['Z']);
+    }
+    return out.length ? out : null;
+  }
+
+  // The offset path an aligned stroke actually rides on, or null for a
+  // centered stroke (and for a stroke whose offset collapsed).
+  function strokeOffsetPath(cmds, stroke) {
+    const align = strokeProp(stroke, 'align');
+    if (!stroke || align === 'center' || !(stroke.w > 0)) return null;
+    return offsetPath(cmds, (align === 'inside' ? 1 : -1) * stroke.w / 2, {
+      join: strokeProp(stroke, 'join'), miterLimit: strokeProp(stroke, 'miter'),
+    });
+  }
+
   // ---------- swatches ----------
   // doc.swatches is the document palette. The PDF/.ai importer fills it from
   // the inks it finds in the file; the Swatches panel edits it. A swatch is a
@@ -1295,6 +1568,7 @@ const VECCORE = (() => {
     clamp01, hexToRgb, rgbToHex, cmykToRgb, rgbToCmyk, rgbToHsb, hsbToRgb, spaceToRgb,
     makeColor, colorHex, colorInfo, paintColor, colorEquals,
     setFill, setStroke, setStrokeProps, setOpacity, swapFillStroke, parseDash, strokeProp,
+    OFFSET_TOL, flattenAdaptive, subpathArea, offsetPath, strokeOffsetPath,
     makeSwatch, swatchKey, swatchColor, findSwatch, addSwatch, removeSwatch, renameSwatch,
     defaultSwatches, defaultSwatchName,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
@@ -2306,6 +2580,7 @@ if (typeof module !== 'undefined' && module.exports) {
  *     stroke: {space, values, rgb, name?, alt?} | null,
  *     strokeWidth,
  *     strokeCap?, strokeJoin?, strokeMiter?, strokeDash?, strokeAlign?,
+ *     strokeOffsetPath?,    // subpaths an inside/outside stroke rides on
  *     opacity?,             // 0..1, constant alpha
  *     fillRule: 'nonzero' | 'evenodd'
  *   } ],
@@ -2432,12 +2707,15 @@ function subpathsBBox(subpaths) {
   return x0 === Infinity ? { x: 0, y: 0, w: 0, h: 0 } : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
-// Inside/outside strokes: PDF only centers strokes, so draw at double weight
-// clipped to the shape (inside) or to everything but the shape (outside) —
-// the same construction Illustrator writes for aligned strokes. Caps and joins
-// come out at that doubled size, which only shows on open or dashed paths.
+// Inside/outside strokes: PDF only centers strokes, so an aligned stroke is a
+// centered stroke on shape.strokeOffsetPath — the path pushed half a weight to
+// that side — which keeps caps, joins and dashes at their true size. The clip
+// stays as a backstop against the stroke leaking across the edge where the
+// shape is thinner than the stroke, and carries the whole job when the offset
+// collapsed and there is no offset path to ride.
 function alignedStrokeOps(shape, res) {
   const align = shape.strokeAlign;
+  const off = shape.strokeOffsetPath;
   const lines = ['q'];
   if (align === 'inside') {
     lines.push(...pathOps(shape.subpaths));
@@ -2450,8 +2728,13 @@ function alignedStrokeOps(shape, res) {
     lines.push(...pathOps(shape.subpaths));
     lines.push('W* n'); // even-odd against the enclosing rect = outside only
   }
-  lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res));
-  lines.push(...pathOps(shape.subpaths));
+  if (off && off.length) {
+    lines.push(...strokeStateOps(shape, res));
+    lines.push(...pathOps(off));
+  } else {
+    lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res));
+    lines.push(...pathOps(shape.subpaths));
+  }
   lines.push('S', 'Q');
   return lines;
 }
@@ -2747,6 +3030,12 @@ const PDFIO = (() => {
         shape.strokeMiter = C.strokeProp(s.stroke, 'miter');
         shape.strokeAlign = C.strokeProp(s.stroke, 'align');
         if (s.stroke.dash) shape.strokeDash = s.stroke.dash.slice();
+        // An aligned stroke exports as a centered stroke on the real offset
+        // path; the writer only falls back to fattening-and-clipping when the
+        // offset collapses. Offsetting lives in veccore, so it is resolved
+        // here rather than inside the (veccore-free) PDF writer.
+        const off = C.strokeOffsetPath(s.cmds, s.stroke);
+        if (off) shape.strokeOffsetPath = subpathsFromCmds(off);
       }
       out.push(shape);
     }
@@ -3060,12 +3349,27 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     appendPath(cmds);
   }
 
-  // Canvas only centers strokes, so inside/outside draw at double weight and
-  // clip to (or away from) the shape — the same construction the PDF exporter
-  // writes, so preview and print agree. Caps and joins render at that doubled
-  // size, which only shows on open or dashed paths; closed shapes, where
-  // alignment actually matters, are exact. The current path on entry is the
-  // shape's, left there by the fill pass.
+  // Offsetting is the costly part of an aligned stroke, so hold the last
+  // result per shape and redo it only when the geometry — or the stroke that
+  // shaped it — changes. Drags replace s.cmds outright, so identity is enough.
+  const offsetCache = new WeakMap();
+  function alignedPath(s) {
+    const st = s.stroke;
+    const key = C.strokeProp(st, 'align') + '|' + st.w + '|' +
+      C.strokeProp(st, 'join') + '|' + C.strokeProp(st, 'miter');
+    const hit = offsetCache.get(s);
+    if (hit && hit.key === key && hit.cmds === s.cmds) return hit.path;
+    const path = C.strokeOffsetPath(s.cmds, st);
+    offsetCache.set(s, { key, cmds: s.cmds, path });
+    return path;
+  }
+
+  // Canvas only centers strokes. An inside or outside stroke is a centered one
+  // riding the path offset half a weight to that side, which is what keeps
+  // caps, joins and dashes at their true size. The clip stays as a backstop:
+  // it is what stops the stroke leaking across the edge where the shape is
+  // thinner than the stroke, and it covers the case where the offset collapses
+  // altogether. The current path on entry is the shape's, left by the fill pass.
   function strokeShape(s) {
     const st = s.stroke;
     ctx.strokeStyle = st.color;
@@ -3077,7 +3381,6 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     const align = C.strokeProp(st, 'align');
     if (align !== 'center') {
       ctx.save();
-      ctx.lineWidth = st.w * 2;
       if (align === 'inside') {
         ctx.clip();
       } else {
@@ -3088,7 +3391,9 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
         appendPath(s.cmds); // even-odd against the enclosing rect = outside only
         ctx.clip('evenodd');
       }
-      drawPath(s.cmds);
+      const off = alignedPath(s);
+      if (off) drawPath(off);
+      else { ctx.lineWidth = st.w * 2; drawPath(s.cmds); } // offset ate the shape
       ctx.stroke();
       ctx.restore();
     } else {
