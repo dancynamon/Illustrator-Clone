@@ -202,6 +202,8 @@ const SEPARATE = (() => {
 
   // ---------- plates ----------
   // One plate per ink, holding only the geometry that actually uses that ink.
+  // (The plate PDF pairs this with a reference layer carrying the full
+  // artwork — see pdfio.platePDFDoc — but a plate's entries are ink only.)
   //
   // Knockout: an object that does NOT use the ink but sits above ink geometry
   // and overlaps it still punches a hole in the plate unless it overprints —

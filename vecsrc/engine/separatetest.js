@@ -191,6 +191,12 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
       'plate pdf: exactly two marked-content blocks');
     ok(/\/OP true \/op true \/OPM 1/.test(src), 'plate pdf: overprint ExtGState present');
 
+    const colorLayer = src.slice(src.indexOf('/OC /oc_color BDC'), src.indexOf('EMC'));
+    ok(/ k\b/.test(colorLayer) && / rg\b/.test(colorLayer) && /\/CS\d+ cs/.test(colorLayer),
+      'plate pdf: the Color layer keeps the whole job in its own colors');
+    ok(colorLayer.split('\n').filter(l => /^[fBS]\*?$/.test(l)).length === 4,
+      'plate pdf: all four objects are on the Color layer for reference');
+
     const spotLayer = src.slice(src.indexOf('/OC /oc_spot BDC'), src.indexOf('EMC', src.indexOf('/OC /oc_spot BDC')));
     ok(!/ rg\b/.test(spotLayer) && !/ RG\b/.test(spotLayer), 'plate pdf: no RGB survives in the Spot layer');
     ok(!/ k\b/.test(spotLayer) && !/ K\b/.test(spotLayer), 'plate pdf: no process build in the Spot layer either');
@@ -212,33 +218,44 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
     const doc = jobDoc();
     const plates = PDFIO.exportPlatePDFs(doc, { marks: false });
 
+    // Color layer = the whole 4-object job for reference, Spot layer = the
+    // one object this ink prints. Both come back in the same content stream,
+    // Color first, so the last shape is the plate itself.
     const white = plates.find(p => p.ink.key === 'WHITE');
     const re = await PDFIO.docFromPDF(white.bytes, 'white.pdf');
     ok(near(re.doc.artboard.w, 864) && near(re.doc.artboard.h, 576),
       'round trip: plate reimports at true piece size');
-    const sep = re.doc.shapes.filter(s => s.fillInfo && s.fillInfo.space === 'separation');
-    ok(sep.length >= 1 && sep.every(s => s.fillInfo.name === 'WHITE'),
+    ok(re.doc.shapes.length === 5, 'round trip: 4 reference objects + 1 inked object');
+    const plateShape = re.doc.shapes[re.doc.shapes.length - 1];
+    ok(plateShape.fillInfo && plateShape.fillInfo.space === 'separation' &&
+      plateShape.fillInfo.name === 'WHITE',
       'round trip: spot ink name survives export -> reimport');
-    ok(near(sep[0].fillInfo.values[0], 1), 'round trip: tint survives');
+    ok(near(plateShape.fillInfo.values[0], 1), 'round trip: tint survives');
     ok(re.doc.swatches.some(s => s.name === 'WHITE'), 'round trip: the ink lands in the palette');
-    // both layers carry the same rectangle, in the same place
-    const b = C.tightBBox(re.doc.shapes[0].cmds);
+    const b = C.tightBBox(plateShape.cmds);
     ok(near(b.x, 72) && near(b.y, 72) && near(b.w, 288) && near(b.h, 144),
       'round trip: geometry lands at the same coordinates');
-    ok(re.doc.shapes.length === 2, 'round trip: Color + Spot copies of the one object');
+    // the reference layer carries the rest of the job, other inks included
+    const refInks = re.doc.shapes.slice(0, 4).map(s => s.fillInfo && s.fillInfo.name);
+    ok(refInks[0] === 'WHITE' && refInks[1] === 'PANTONE 185 C',
+      'round trip: Color layer holds the full artwork, other inks and all');
+    ok(re.doc.shapes.slice(0, 4).some(s => !s.fillInfo),
+      'round trip: ...including the RGB object');
 
     const pms = plates.find(p => p.ink.key === 'PANTONE 185 C');
     const re2 = await PDFIO.docFromPDF(pms.bytes, 'pms.pdf');
-    const s2 = re2.doc.shapes.find(s => s.fillInfo && s.fillInfo.space === 'separation');
+    ok(re2.doc.shapes.length === 5, 'round trip: the spot red plate inks one object');
+    const s2 = re2.doc.shapes[re2.doc.shapes.length - 1];
     ok(s2.fillInfo.name === 'PANTONE 185 C', 'round trip: spaces in the ink name survive (#20 escaping)');
     ok(s2.fillInfo.alt && near(s2.fillInfo.alt.values[1], 0.91) && near(s2.fillInfo.alt.values[2], 0.76),
       'round trip: the ink alternate comes back identical, not via RGB');
+    ok(near(C.tightBBox(s2.cmds).x, 468), 'round trip: only the spot red geometry is inked');
 
     // a blank ink would render invisible, so the Spot layer's preview
     // alternate moves — the artwork's own color is left exactly as authored
     const reWhite = await VecPDF.parsePDF(white.bytes);
-    const cols = reWhite.pages[0].shapes.map(s => s.fill).filter(f => f && f.space === 'separation');
-    ok(cols.length === 2 && cols.every(f => f.name === 'WHITE'), 'round trip: both layers print WHITE');
+    const cols = reWhite.pages[0].shapes.map(s => s.fill).filter(f => f && f.name === 'WHITE');
+    ok(cols.length === 2, 'round trip: WHITE appears once for reference and once as the plate');
     ok(cols[0].alt.values.every(v => v === 0), 'round trip: Color layer keeps the ink as authored');
     ok(cols[1].alt.values[3] > 0, 'round trip: blank white ink gets a visible preview alternate on the Spot layer');
   }

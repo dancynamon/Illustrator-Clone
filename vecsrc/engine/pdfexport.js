@@ -33,7 +33,7 @@
  * plate = {
  *   width, height,          // piece (trim) size in points
  *   ink: { name, cmyk:[c,m,y,k], type:'spot'|'process' },
- *   colorShapes: [shape],   // Color layer: the art in its own colors
+ *   colorShapes: [shape],   // Color layer: the whole artwork, own colors
  *   spotShapes:  [ {subpaths, fillTint, strokeTint, strokeWidth,
  *                   fillRule, overprint} ],   // Spot layer: the ink itself
  *   marks?: true,           // crop + registration marks and ink label
@@ -371,7 +371,8 @@ function exportPlatePDF(plate) {
   // piece space: art coordinates are top-left origin, y-down, inside the trim
   L.push('1 0 0 -1 ' + fmt(m) + ' ' + fmt(H - m) + ' cm');
 
-  // Color layer first (underneath), in the artwork's own colors.
+  // Color layer first (underneath): the whole artwork in its own colors, so
+  // the plate can be checked against the job it was separated from.
   L.push('/OC /oc_color BDC');
   for (const s of plate.colorShapes || []) {
     if (!s || !s.subpaths || !s.subpaths.length) continue;
@@ -380,8 +381,9 @@ function exportPlatePDF(plate) {
   }
   L.push('EMC');
 
-  // Spot layer on top: the same geometry as this one ink, overprinting by
-  // default (house convention) so the plate composites instead of erasing.
+  // Spot layer on top: only what this ink prints, as this one ink,
+  // overprinting by default (house convention) so it composites over the
+  // reference art instead of erasing it. This layer alone is the plate.
   L.push('/OC /oc_spot BDC');
   L.push(gsRes(res, 'op') + ' gs');
   const sepCol = t => ({
