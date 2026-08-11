@@ -144,6 +144,10 @@
   }
   .subrow .seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .subrow .seg button[disabled] { opacity: .35; cursor: default; }
+  .subrow .seg input[type=color] {
+    width: 26px; height: 20px; padding: 0; cursor: pointer;
+    border: 1px solid #4a4a4a; border-radius: 3px; background: #3a3a3b;
+  }
   #preflight { margin-top: 8px; }
   #preflight .issue {
     display: flex; gap: 6px; padding: 3px 0; color: var(--text-dim); line-height: 1.35;
@@ -269,6 +273,13 @@
         <span>Preview</span>
         <span class="seg">
           <button id="ink-all" title="Show every ink (composite)">All inks</button>
+        </span>
+      </div>
+      <div class="subrow">
+        <span>Substrate</span>
+        <span class="seg">
+          <input type="color" id="substrate-color" value="#ffffff" title="Material the piece prints on — backs the plate's Color layer">
+          <button id="substrate-none" title="White paper (no substrate)">Paper</button>
         </span>
       </div>
       <div class="subrow">

@@ -15,6 +15,11 @@
 //
 // Overprint is a per-shape tri-state: shape.overprint === true (overprint),
 // === false (knockout), undefined (inherit the plate default).
+//
+// doc.substrate is the material the piece prints on (hex, or null for white
+// paper). It is never an ink and never reaches a plate's Spot layer; it only
+// backs the reference art, because white ink on blue foam is invisible
+// against white and obvious against the foam.
 const SEPARATE = (() => {
   'use strict';
 
@@ -252,6 +257,30 @@ const SEPARATE = (() => {
     return base + '_' + nm + '_spot+color.pdf';
   }
 
+  // ---------- substrate ----------
+  const PAPER = '#ffffff';
+
+  function substrateOf(doc) { // null when the piece runs on white paper
+    const hex = doc && doc.substrate;
+    if (typeof hex !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
+    return hex.toLowerCase() === PAPER ? null : hex.toLowerCase();
+  }
+
+  function setSubstrate(doc, hex) {
+    if (hex == null) { doc.substrate = null; return true; }
+    if (typeof hex !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
+    doc.substrate = hex.toLowerCase();
+    return true;
+  }
+
+  // Substrate as a print color, so the reference layer stays free of RGB.
+  function substrateColor(doc) {
+    const hex = substrateOf(doc);
+    if (!hex) return null;
+    const rgb = hexToRgb(hex);
+    return { space: 'cmyk', values: rgbToCmyk(rgb), rgb };
+  }
+
   // ---------- ink management ----------
   // All of these mutate doc in place and return how many objects changed, so
   // the caller can run them inside its own history commit.
@@ -464,6 +493,7 @@ const SEPARATE = (() => {
     hexToRgb, rgbToHex, rgbToCmyk, cmykToRgb, cmykToHex,
     colorInks, shapeInks, shapeColors, printableShapes, spotSwatches,
     documentInks, findInk, previewHex, separatePlates, plateFilename,
+    PAPER, substrateOf, setSubstrate, substrateColor,
     renameInk, convertSpotToProcess, convertProcessToSpot, mergeInks, deleteInk,
     registerSwatch, setOverprint, preflight,
   };

@@ -260,6 +260,50 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
     ok(cols[1].alt.values[3] > 0, 'round trip: blank white ink gets a visible preview alternate on the Spot layer');
   }
 
+  // ---- substrate: the material under the reference art ----
+  {
+    const doc = jobDoc();
+    ok(S.substrateOf(doc) === null, 'substrate: a document defaults to white paper');
+    ok(S.setSubstrate(doc, '#1F4E79') === true && S.substrateOf(doc) === '#1f4e79',
+      'substrate: set from a hex color');
+    ok(S.setSubstrate(doc, 'blue') === false && S.substrateOf(doc) === '#1f4e79',
+      'substrate: junk is refused, the old value stands');
+    ok(C.parseDoc(C.serializeDoc(doc)).substrate === '#1f4e79',
+      'substrate: survives .aqv serialize/parse');
+
+    const plate = PDFIO.exportPlatePDFs(doc, { marks: false }).find(p => p.ink.key === 'WHITE');
+    const src = latin1(plate.bytes);
+    const colorLayer = src.slice(src.indexOf('/OC /oc_color BDC'), src.indexOf('EMC'));
+    const spotLayer = src.slice(src.indexOf('/OC /oc_spot BDC'), src.indexOf('EMC', src.indexOf('/OC /oc_spot BDC')));
+    ok(/0\.7438 0\.3554 0 0\.5255 k\n0 0 864 576 re/.test(colorLayer),
+      'substrate: the Color layer starts on a piece-size panel of the material');
+    ok(colorLayer.indexOf('0 0 864 576 re') < colorLayer.indexOf('72 72 m'),
+      'substrate: the material goes down before the artwork');
+    ok(colorLayer.split('\n').filter(l => /^[fBS]\*?$/.test(l)).length === 5,
+      'substrate: material + the four art objects');
+    ok(!/0 0 864 576 re/.test(spotLayer), 'substrate: the material never reaches the plate');
+
+    // and the white panel now paints white over it instead of vanishing
+    const re = await PDFIO.docFromPDF(plate.bytes, 'white.pdf');
+    const back = C.tightBBox(re.doc.shapes[0].cmds);
+    ok(re.doc.shapes[0].fillInfo.space === 'cmyk' && near(back.w, 864) && near(back.h, 576),
+      'substrate: it reimports as a CMYK panel at piece size');
+    ok(re.doc.shapes[0].fill === '#1f4e79', 'substrate: the material color round-trips');
+    ok(re.doc.shapes[1].fillInfo.name === 'WHITE',
+      'substrate: the white panel sits on top of it, visible');
+
+    // marks on: the plate label names the stock
+    const marked = PDFIO.exportPlatePDFs(doc).find(p => p.ink.key === 'WHITE');
+    ok(/on #1f4e79/.test(latin1(marked.bytes)), 'substrate: the ink label names the stock');
+
+    // back to paper and the extra panel is gone again
+    S.setSubstrate(doc, null);
+    const bare = PDFIO.exportPlatePDFs(doc, { marks: false }).find(p => p.ink.key === 'WHITE');
+    ok(!/0 0 864 576 re/.test(latin1(bare.bytes)), 'substrate: white paper adds nothing');
+    ok(S.setSubstrate(doc, '#ffffff') && S.substrateOf(doc) === null,
+      'substrate: plain white counts as paper, not a material');
+  }
+
   // ---- overprint flags are preserved through the plate writer ----
   {
     const doc = jobDoc();

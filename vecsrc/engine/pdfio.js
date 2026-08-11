@@ -192,8 +192,10 @@ const PDFIO = (() => {
   // Build the VecPDF plate description for one separated plate.
   //
   // Color layer: the whole artwork in its own colors, for reference — the
-  // press desk checks the plate against the job it came from. Spot layer:
-  // only what this ink actually prints. That layer is the plate.
+  // press desk checks the plate against the job it came from. On a colored
+  // substrate it is backed by the material color, so white ink reads the way
+  // it will on the piece instead of vanishing into the page. Spot layer: only
+  // what this ink actually prints. That layer is the plate.
   function platePDFDoc(doc, plate, opts = {}) {
     const colorShapes = [], spotShapes = [];
     for (const s of S.printableShapes(doc)) {
@@ -219,6 +221,8 @@ const PDFIO = (() => {
       width: doc.artboard.w,
       height: doc.artboard.h,
       ink: plateInk(plate.ink),
+      substrate: S.substrateColor(doc),
+      substrateName: S.substrateOf(doc),
       colorShapes, spotShapes,
       marks: opts.marks !== false,
       margin: opts.margin,
