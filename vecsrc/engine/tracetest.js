@@ -266,7 +266,8 @@ function windingAt(pts, x, y) {
   ok(poly.every(c => c[0] !== 'C'), 'fitPath polygonal emits no curves');
   const fitted = T.fitPath(square, { curves: true, cornerAngle: 60, tolerance: 1 });
   ok(fitted.filter(c => c[0] === 'C').length === 0, 'fitPath keeps 90-degree corners straight');
-  ok(fitted.filter(c => c[0] === 'L').length === 4, 'fitPath emits 4 straight sides for a square');
+  ok(fitted.filter(c => c[0] === 'L').length === 3 && fitted.length === 5,
+    'fitPath emits a square as M + 3 lines + Z (the fourth side is the close)');
 }
 {
   // a sampled circle must come back as curves, and few of them
@@ -295,58 +296,229 @@ function windingAt(pts, x, y) {
   ok(!T.isStraight([[0, 0], [3, 5], [7, 5], [10, 0]]), 'isStraight rejects a real curve');
 }
 
-// ---- trapping (spread) ----
+// ---- direction independence ----
+// Two neighbouring regions walk their shared boundary in opposite directions.
+// Every "pick the extreme point" decision in simplify/fit therefore has to be
+// reversal-invariant, or the two sides approximate the same run differently
+// and the trace leaks artboard between them.
 {
-  const sq = [[0, 0], [10, 0], [10, 10], [0, 10]];
-  const grown = T.spreadLoop(sq, 0.5);
-  ok(T.polyArea(grown) > T.polyArea(sq), 'spreadLoop grows an outer loop');
-  ok(Math.abs(grown[0][0] + 0.5) < 1e-9 && Math.abs(grown[2][0] - 10.5) < 1e-9,
-    'spreadLoop offsets square corners by exactly the spread');
-  const hole = sq.slice().reverse();
-  const shrunk = T.spreadLoop(hole, 0.5);
-  ok(Math.abs(T.polyArea(shrunk)) < Math.abs(T.polyArea(hole)), 'spreadLoop shrinks a hole (more material)');
-  ok(T.spreadLoop(sq, 0) === sq, 'spreadLoop with no spread is a no-op');
-  // and it must close the hairlines between neighbouring traced regions
-  const b = bitmap(60, 60, WHITE);
-  for (let y = 0; y < 60; y++) {
-    for (let x = 0; x < 60; x++) {
-      const v = Math.sin(x / 7) * Math.cos(y / 5);
-      put(b, x, y, v > 0.3 ? RED : v < -0.3 ? BLUE : GREEN);
+  // minimal case: naive first-max-wins RDP splits this run in two places
+  const run = [[0, 0], [0, 3], [2, 3], [2, 5], [5, 5]];
+  const f = T.rdpOpen(run, 1.5);
+  const r = T.rdpOpen(run.slice().reverse(), 1.5).reverse();
+  ok(JSON.stringify(f) === JSON.stringify(r),
+    'rdp splits a tied run the same way in both directions: ' + JSON.stringify(f) + ' vs ' + JSON.stringify(r));
+}
+{
+  // and over a pile of random pixel-grid staircases, at several tolerances
+  let seed = 1;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  let checked = 0, mismatched = 0;
+  for (let trial = 0; trial < 3000; trial++) {
+    const pts = [[0, 0]];
+    let x = 0, y = 0;
+    for (let i = 0, n = 4 + ((rnd() * 14) | 0); i < n; i++) {
+      if (rnd() < 0.5) x += 1 + ((rnd() * 3) | 0); else y += 1 + ((rnd() * 3) | 0);
+      pts.push([x, y]);
+    }
+    for (const tol of [0, 0.5, 1, 1.5, 2, 3]) {
+      checked++;
+      const a = JSON.stringify(T.rdpOpen(pts, tol));
+      const b = JSON.stringify(T.rdpOpen(pts.slice().reverse(), tol).reverse());
+      if (a !== b) mismatched++;
     }
   }
-  const uncovered = spread => {
-    const r = T.trace(b, { mode: 'color', colors: 3, tolerance: 1, minArea: 3, spread });
-    const g = rasterize(r.paths, 60, 60);
-    let n = 0;
-    for (let i = 0; i < 60 * 60; i++) if (g[i] < 0) n++;
-    return n;
+  ok(mismatched === 0, `rdp is reversal-invariant over ${checked} random staircase runs (${mismatched} mismatches)`);
+}
+{
+  // the same invariant on whole loops, taken from a real traced image
+  const b = bitmap(48, 48, WHITE);
+  for (let y = 0; y < 48; y++) {
+    for (let x = 0; x < 48; x++) {
+      const v = Math.sin(x / 6) * Math.cos(y / 5) + 0.4 * Math.sin((x + y) / 3);
+      put(b, x, y, v > 0.35 ? RED : v < -0.35 ? BLUE : GREEN);
+    }
+  }
+  const q = T.quantize(b, { mode: 'color', colors: 3 });
+  const reg = T.labelRegions(q.idx, 48, 48);
+  const rp = T.regionPixels(reg);
+  const J = T.junctionMap(reg.labels, 48, 48);
+  const multiset = pts => pts.map(p => p.map(v => v.toFixed(4)).join(',')).sort().join(';');
+  // Compare the curve itself, not how it happens to be encoded: which segment
+  // ends up implied by the Z depends on where the traversal starts.
+  const cmdPoints = cmds => {
+    const out = [];
+    for (const su of C.flattenPath(cmds, 6)) {
+      const seen = su.pts.map(p => p[0].toFixed(4) + ',' + p[1].toFixed(4));
+      for (let i = 0; i < seen.length; i++) {
+        if (i && seen[i] === seen[i - 1]) continue;
+        if (i === seen.length - 1 && seen[i] === seen[0]) continue;
+        out.push(seen[i]);
+      }
+    }
+    return out.sort().join(';');
   };
-  const gap0 = uncovered(0), gap1 = uncovered(0.3);
-  ok(gap1 < gap0, `spread closes trace hairlines (${gap0} -> ${gap1} uncovered px)`);
+  let loops = 0, simpBad = 0, fitBad = 0;
+  for (let l = 0; l < reg.count; l++) {
+    for (const lp of T.contours(reg.labels, 48, 48, l, rp.px, rp.off[l], rp.off[l + 1], J)) {
+      if (lp.pts.length < 4) continue;
+      loops++;
+      const rev = { pts: lp.pts.slice().reverse(), fix: Array.from(lp.fix).reverse() };
+      const sa = T.simplifyLoop(lp.pts, lp.fix, 1.5);
+      const sb = T.simplifyLoop(rev.pts, rev.fix, 1.5);
+      if (multiset(sa.pts) !== multiset(sb.pts)) simpBad++;
+      const fa = T.fitPath(sa.pts, { tolerance: 1.5, cornerAngle: 60 }, sa.fix);
+      const fb = T.fitPath(sb.pts, { tolerance: 1.5, cornerAngle: 60 }, sb.fix);
+      if (cmdPoints(fa) !== cmdPoints(fb)) fitBad++;
+    }
+  }
+  ok(loops >= 15, `${loops} contour loops available to check`);
+  ok(simpBad === 0, `simplifyLoop is reversal-invariant on real contours (${simpBad}/${loops} differed)`);
+  ok(fitBad === 0, `fitPath is reversal-invariant on real contours (${fitBad}/${loops} differed)`);
 }
 
-// ---- shared boundaries (junction pinning) ----
+// ---- no gaps between neighbouring regions ----
+// The regression guard that matters: a traced image must tile completely, with
+// no artboard showing through between adjacent regions at any tolerance.
 {
-  // two regions either side of a wiggly seam must simplify that seam to the
-  // exact same geometry, or every colour boundary in a photo trace leaks white
+  const b = bitmap(64, 64, WHITE);
+  for (let y = 0; y < 64; y++) {
+    for (let x = 0; x < 64; x++) {
+      const v = Math.sin(x / 7) * Math.cos(y / 5) + 0.5 * Math.sin((x - y) / 4);
+      const u = Math.cos(x / 11) + Math.sin(y / 9);
+      put(b, x, y, v > 0.5 ? RED : v < -0.5 ? BLUE : u > 0.6 ? GREEN : [90, 90, 90, 255]);
+    }
+  }
+  for (const opts of [
+    { tolerance: 0, curves: false }, { tolerance: 0, curves: true },
+    { tolerance: 1, curves: true }, { tolerance: 1.5, curves: true },
+    { tolerance: 3, curves: true }, { tolerance: 1.5, curves: false },
+  ]) {
+    const r = T.trace(b, Object.assign({ mode: 'color', colors: 4, minArea: 3 }, opts));
+    const g = rasterize(r.paths, 64, 64);
+    let n = 0;
+    for (let i = 0; i < 64 * 64; i++) if (g[i] < 0) n++;
+    ok(n === 0, `no gaps at tolerance ${opts.tolerance}, curves ${opts.curves} (${n} uncovered px)`);
+  }
+}
+{
+  // a wiggly two-colour seam, the simplest shape of the bug
   const b = bitmap(40, 40, RED);
   for (let x = 0; x < 40; x++) {
     const edge = Math.round(20 + 6 * Math.sin(x / 4));
     for (let y = edge; y < 40; y++) put(b, x, y, BLUE);
   }
-  const r = T.trace(b, { mode: 'color', colors: 2, tolerance: 1.5, minArea: 2, spread: 0 });
+  const r = T.trace(b, { mode: 'color', colors: 2, tolerance: 1.5, minArea: 2 });
   ok(r.paths.length === 2, 'seam: two regions');
   const g = rasterize(r.paths, 40, 40);
   let n = 0;
   for (let i = 0; i < 1600; i++) if (g[i] < 0) n++;
-  ok(n === 0, `seam: shared boundary leaves no gap at all (${n} uncovered px)`);
+  ok(n === 0, `seam: shared boundary leaves no gap (${n} uncovered px)`);
+}
+{
+  // and an island: a region fully enclosed by another has no junction anywhere
+  // on its boundary, so the anchors have to come from the geometry alone
+  const b = bitmap(40, 40, RED);
+  fillDisc(b, 20, 20, 11, BLUE);
+  const r = T.trace(b, { mode: 'color', colors: 2, tolerance: 1.5, minArea: 2 });
+  ok(r.paths.length === 2, 'island: two regions');
+  const g = rasterize(r.paths, 40, 40);
+  let n = 0;
+  for (let i = 0; i < 1600; i++) if (g[i] < 0) n++;
+  ok(n === 0, `island: enclosed region abuts its host exactly (${n} uncovered px)`);
   const j = (() => {
     const q = T.quantize(b, { mode: 'color', colors: 2 });
     const reg = T.labelRegions(q.idx, 40, 40);
     return T.junctionMap(reg.labels, 40, 40);
   })();
-  ok(j.length === 41 * 41, 'junctionMap covers the whole vertex grid');
-  ok(j[0] === 0, 'image corner with one region is not a junction');
+  let jn = 0;
+  for (let i = 0; i < j.length; i++) jn += j[i] & 1;
+  ok(jn === 0, 'island: confirms there is no junction to pin the shared loop to');
+}
+{
+  // junctionMap still marks vertices where three regions meet
+  const b = bitmap(9, 9, RED);
+  fillRect(b, 0, 0, 4, 4, BLUE);
+  fillRect(b, 4, 0, 5, 4, GREEN);
+  const q = T.quantize(b, { mode: 'color', colors: 3 });
+  const reg = T.labelRegions(q.idx, 9, 9);
+  const j = T.junctionMap(reg.labels, 9, 9);
+  ok(j.length === 10 * 10, 'junctionMap covers the whole vertex grid');
+  ok((j[4 + 4 * 10] & 1) === 1, 'junctionMap marks the vertex where all three regions meet');
+  ok((j[5 + 5 * 10] & 1) === 0, 'an interior vertex inside one region is not a junction');
+  ok((j[0] & 1) === 0, 'image corner with one region is not a junction');
+  ok((j[0] & 2) === 2 && (j[9 + 9 * 10] & 2) === 2, 'image border vertices carry the edge pin');
+  ok((j[5 + 5 * 10] & 2) === 0, 'interior vertices carry no edge pin');
+}
+{
+  // the image border is a crop, not an edge of the artwork: simplification
+  // must not pull the trace back from it and leave artboard at the edge
+  const b = bitmap(40, 40, RED);
+  for (let y = 0; y < 40; y++) for (let x = 0; x < 40; x++) if (x + y > 46) put(b, x, y, BLUE);
+  const r = T.trace(b, { mode: 'color', colors: 2, tolerance: 3, minArea: 2 });
+  const g = rasterize(r.paths, 40, 40);
+  let n = 0;
+  for (let i = 0; i < 1600; i++) if (g[i] < 0) n++;
+  ok(n === 0, `corner region keeps the image edge under heavy simplification (${n} uncovered px)`);
+}
+{
+  // ...but the artwork's OWN outline, against transparency, still simplifies.
+  // Pinning that too would freeze every alpha silhouette at pixel resolution.
+  const b = bitmap(64, 64, [0, 0, 0, 0]);
+  fillDisc(b, 32, 32, 28, RED);
+  const raw = T.trace(b, { mode: 'exact', colors: 8, tolerance: 0, curves: false, minArea: 2 });
+  const smooth = T.trace(b, { mode: 'exact', colors: 8, tolerance: 1, cornerAngle: 60, minArea: 2 });
+  ok(raw.paths[0].cmds.length > 100, `unsimplified disc keeps its staircase (${raw.paths[0].cmds.length} cmds)`);
+  ok(smooth.paths[0].cmds.length < 30,
+    `transparent silhouette still smooths (${raw.paths[0].cmds.length} -> ${smooth.paths[0].cmds.length} cmds)`);
+  const cs = smooth.paths[0].cmds.filter(c => c[0] === 'C').length;
+  ok(cs >= 2 && smooth.paths[0].cmds.every(c => c[0] !== 'L'),
+    `transparent silhouette becomes pure curves (${cs} cubics, no line segments)`);
+  let worstR = 0;
+  for (const su of C.flattenPath(smooth.paths[0].cmds, 16)) {
+    for (const p of su.pts) worstR = Math.max(worstR, Math.abs(Math.hypot(p[0] - 32, p[1] - 32) - 28));
+  }
+  ok(worstR < 1.5, `smoothed silhouette still tracks the source circle (max ${worstR.toFixed(2)}px off)`);
+}
+
+{
+  // Randomized guard on the invariant that matters: wherever two traced
+  // regions meet, their shared boundary is described identically by both, so
+  // the artwork tiles with no artboard showing through inside it.
+  let seed = 7;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const pal = [RED, BLUE, GREEN, WHITE, [90, 90, 90, 255], [250, 200, 40, 255]];
+  let configs = 0, gaps = 0, worst = 0;
+  for (let trial = 0; trial < 14; trial++) {
+    const w = 22 + ((rnd() * 26) | 0), h = 22 + ((rnd() * 26) | 0);
+    const b = bitmap(w, h, WHITE);
+    const f1 = 1 + rnd() * 7, f2 = 1 + rnd() * 7, f3 = 1 + rnd() * 7;
+    const kind = trial % 3;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (kind === 0) {
+          const v = Math.sin(x / f1) * Math.cos(y / f2) + 0.5 * Math.sin((x - y) / f3);
+          put(b, x, y, pal[v > 0.5 ? 0 : v < -0.5 ? 1 : 2]);
+        } else if (kind === 1) {
+          put(b, x, y, pal[Math.abs(Math.round(x / f1) + Math.round(y / f2)) % pal.length]);
+        } else {
+          const v = Math.round(x / w * 255);
+          put(b, x, y, [v, (v * 3) % 256, 255 - v, 255]);
+        }
+      }
+    }
+    for (const preset of ['bw', 'gray', 'color3', 'color6', 'photo', 'pixel']) {
+      for (const tolerance of [0, 1, 2, 4]) {
+        configs++;
+        const r = T.trace(b, { preset, tolerance, ignoreWhite: false });
+        const g = rasterize(r.paths, w, h);
+        let n = 0;
+        for (let i = 0; i < w * h; i++) if (g[i] < 0) n++;
+        if (n) { gaps++; worst = Math.max(worst, n); }
+      }
+    }
+  }
+  ok(gaps === 0, `${configs} preset/tolerance combinations tile with no interior gaps (${gaps} failed, worst ${worst} px)`);
 }
 
 // ---- full pipeline ----
@@ -474,7 +646,7 @@ function windingAt(pts, x, y) {
   const b = bitmap(16, 16, WHITE);
   fillRect(b, 2, 2, 6, 6, RED);
   fillRect(b, 9, 9, 5, 5, BLUE);
-  const r = T.trace(b, { mode: 'exact', colors: 8, minArea: 1, tolerance: 0, curves: false, ignoreWhite: true, spread: 0 });
+  const r = T.trace(b, { mode: 'exact', colors: 8, minArea: 1, tolerance: 0, curves: false, ignoreWhite: true });
   const doc = C.newDoc({ w: 4, h: 4, units: 'in' });
   // image placed at 0,0 sized 288x288pt -> 18pt per source pixel
   const frame = C.rectPath(0, 0, 288, 288);
