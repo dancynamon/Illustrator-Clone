@@ -11,9 +11,13 @@
 
   const TOOLS = {
     select: 'Selection', direct: 'Direct Selection', pen: 'Pen',
-    rect: 'Rectangle', ellipse: 'Ellipse', hand: 'Hand', zoom: 'Zoom',
+    rect: 'Rectangle', ellipse: 'Ellipse', eyedrop: 'Eyedropper',
+    hand: 'Hand', zoom: 'Zoom',
   };
-  const TOOL_KEYS = { v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', h: 'hand', z: 'zoom' };
+  const TOOL_KEYS = {
+    v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', i: 'eyedrop',
+    h: 'hand', z: 'zoom',
+  };
 
   const AUTOSAVE_KEY = 'aqvec_autosave';
 
@@ -756,6 +760,66 @@
   });
   $('#op-num').addEventListener('change', e => pushOpacity(+e.target.value, false));
 
+  // ---------- eyedropper ----------
+  // Sampling reads an object's own attributes rather than the pixel it
+  // painted, which is the whole point on a print document: a spot ink comes
+  // back as the ink, and a CMYK build as the build. Only empty artboard falls
+  // back to a flat colour.
+  function sampleHitAt(wx, wy) {
+    // Unlike selection this looks through locked layers — sampling only reads,
+    // so if you can see a colour you can pick it.
+    const visible = new Set(state.doc.layers.filter(l => l.visible).map(l => l.id));
+    const tol = 3 / state.view.scale;
+    for (let i = state.doc.shapes.length - 1; i >= 0; i--) {
+      const s = state.doc.shapes[i];
+      if (!visible.has(s.layer)) continue;
+      if (C.hitTestShape(s, wx, wy, tol)) return s;
+    }
+    return null;
+  }
+
+  // Bare artboard is the white it is painted with; off the artboard there is
+  // no artwork to sample and the tool does nothing.
+  function sampleAppearance(wx, wy) {
+    const hit = sampleHitAt(wx, wy);
+    if (hit) return C.shapeAppearance(hit);
+    const ab = state.doc.artboard;
+    if (wx < 0 || wy < 0 || wx > ab.w || wy > ab.h) return null;
+    return {
+      fill: C.makeColor({ space: 'cmyk', values: [0, 0, 0, 0] }),
+      stroke: null, strokeAttrs: null, opacity: 1,
+    };
+  }
+
+  // Plain click takes the whole appearance the way Illustrator's does; shift
+  // takes only the colour, into whichever well is targeted. live=true is the
+  // drag, which keeps sampling as it passes over objects and lands as a single
+  // history entry when the pointer comes up.
+  function applySample(ap, colorOnly, live) {
+    if (!ap) return;
+    if (colorOnly) {
+      pushColor(ap.fill || ap.stroke, live);
+      return;
+    }
+    state.paint = { fill: ap.fill, stroke: ap.stroke };
+    if (ap.fill) state.pick.fill = ap.fill;
+    if (ap.stroke) state.pick.stroke = ap.stroke;
+    if (state.sel.size) {
+      C.applyAppearance(state.doc, [...state.sel], ap);
+      if (!live && C.commit(state.history, state.doc)) scheduleAutosave();
+    }
+    render();
+  }
+
+  function showSample(wx, wy) {
+    const ap = sampleAppearance(wx, wy);
+    const col = ap && (ap.fill || ap.stroke);
+    $('#s-sample i').style.background = col ? C.colorHex(col) : 'transparent';
+    $('#s-sample b').textContent = col
+      ? (col.space === 'separation' ? col.name + ' · spot' : C.defaultSwatchName(col))
+      : (ap ? 'None' : '—');
+  }
+
   // ---------- stroke options ----------
   function selStroke() {
     const withStroke = selShapes().filter(s => s.stroke);
@@ -982,6 +1046,8 @@
     document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
       b.classList.toggle('active', b.dataset.tool === t));
     stagewrap.className = 'tool-' + t;
+    $('#statusbar').classList.toggle('sampling', t === 'eyedrop');
+    if (t !== 'eyedrop') $('#s-sample b').textContent = '—';
     updateReadouts();
   }
 
@@ -1009,6 +1075,15 @@
       const f = e.altKey ? 1 / 1.5 : 1.5;
       state.view = C.zoomAt(state.view, e.clientX - r.left, e.clientY - r.top, f);
       render();
+      return;
+    }
+    if (state.tool === 'eyedrop') {
+      if (e.button === 0) {
+        canvas.setPointerCapture(e.pointerId);
+        state.drag = { kind: 'sample', shift: e.shiftKey };
+        const [wx, wy] = worldPt(e);
+        applySample(sampleAppearance(wx, wy), e.shiftKey, true);
+      }
       return;
     }
     if (state.tool !== 'select' || e.button !== 0) return;
@@ -1113,10 +1188,15 @@
         d.m1 = [sx, sy];
         d.moved = true;
         render();
+      } else if (d.kind === 'sample') {
+        applySample(sampleAppearance(wx, wy), d.shift, true);
+        showSample(wx, wy);
       }
     } else if (state.tool === 'select' && !state.pan) {
       const hh = hitHandle(sx, sy);
       canvas.style.cursor = hh ? (hh.type === 'rotate' ? 'crosshair' : HANDLE_CURSOR[hh.c]) : '';
+    } else if (state.tool === 'eyedrop') {
+      showSample(wx, wy);
     }
     const k = C.PT_PER[state.doc.units];
     $('#s-coords').textContent = `x: ${(wx / k).toFixed(2)} ${state.doc.units}   y: ${(wy / k).toFixed(2)} ${state.doc.units}`;
@@ -1132,6 +1212,11 @@
     const d = state.drag;
     if (!d) return;
     state.drag = null;
+    if (d.kind === 'sample') {
+      commitNow(); // the whole sampling drag is one step
+      render();
+      return;
+    }
     if (d.kind === 'marquee') {
       if (!d.moved) {
         if (!d.shift) { state.sel.clear(); render(); }
@@ -1252,6 +1337,7 @@
     openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
     setTarget, pushColor, pushOpacity, swapPaints, defaultPaints,
+    sampleAppearance, applySample,
     applyStroke, applySwatch, addCurrentSwatch, renameSwatchAt,
   };
 })();

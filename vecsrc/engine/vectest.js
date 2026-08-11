@@ -297,6 +297,58 @@ function minDistToSource(srcCmds, offCmds) {
   ok(C.strokeOffsetPath(rect, { ...st, w: 200 }) === null, 'a stroke wider than the shape has no offset path');
 }
 
+// ---- appearance (what the eyedropper carries) ----
+{
+  const d = C.newDoc();
+  const spot = C.makeColor({
+    space: 'separation', name: 'PANTONE 185 C', values: [1],
+    alt: { space: 'cmyk', values: [0, 0.91, 0.76, 0] },
+  });
+  const src = C.addShape(d, { type: 'path', cmds: C.rectPath(0, 0, 10, 10) });
+  C.setFill(d, [src.id], spot);
+  C.setStroke(d, [src.id], C.makeColor({ space: 'cmyk', values: [0, 0, 0, 1] }));
+  C.setStrokeProps(d, [src.id], { w: 5, cap: 'round', join: 'bevel', miter: 3, align: 'inside', dash: '9 4' });
+  C.setOpacity(d, [src.id], 0.6);
+
+  const ap = C.shapeAppearance(src);
+  ok(ap.fill.space === 'separation' && ap.fill.name === 'PANTONE 185 C' && ap.fill.alt.space === 'cmyk',
+    'sampling a spot ink hands back the ink, not a flattened preview');
+  ok(ap.stroke.space === 'cmyk' && ap.strokeAttrs.w === 5 && ap.strokeAttrs.align === 'inside',
+    'appearance carries the stroke and its attributes');
+  ok(near(ap.opacity, 0.6), 'appearance carries opacity');
+
+  // paint it onto two plain shapes at once
+  const a = C.addShape(d, { type: 'path', cmds: C.rectPath(20, 0, 10, 10) });
+  const b = C.addShape(d, { type: 'path', fill: '#123456', cmds: C.rectPath(40, 0, 10, 10) });
+  const h = C.newHistory(d);
+  C.applyAppearance(d, [a.id, b.id], ap);
+  ok(C.commit(h, d) && h.stack.length === 2, 'an eyedropper drop is one history entry');
+  for (const s of [a, b]) {
+    ok(s.fill === src.fill && s.fillInfo.name === 'PANTONE 185 C', 'fill and its ink copied');
+    ok(s.stroke.w === 5 && s.stroke.cap === 'round' && s.stroke.align === 'inside' &&
+      JSON.stringify(s.stroke.dash) === '[9,4]', 'stroke attributes copied onto a shape that had none');
+    ok(s.strokeInfo.space === 'cmyk' && near(s.opacity, 0.6), 'stroke ink and opacity copied');
+  }
+}
+{
+  // copying a plain appearance has to clear what the target already had
+  const d = C.newDoc();
+  const plain = C.addShape(d, { type: 'path', fill: '#ff0000', cmds: C.rectPath(0, 0, 10, 10) });
+  const dressed = C.addShape(d, { type: 'path', fill: '#00ff00', cmds: C.rectPath(20, 0, 10, 10) });
+  C.setStrokeProps(d, [dressed.id], { w: 3 });
+  C.setStroke(d, [dressed.id], C.makeColor({ space: 'rgb', values: [0, 0, 1] }));
+  C.setStrokeProps(d, [dressed.id], { w: 3, dash: '4 2' });
+  C.applyAppearance(d, [dressed.id], C.shapeAppearance(plain));
+  ok(dressed.fill === '#ff0000' && dressed.stroke === null, 'a source with no stroke clears the target stroke');
+  const noDash = C.addShape(d, { type: 'path', fill: '#ff0000', stroke: { color: '#000000', w: 2 }, cmds: C.rectPath(40, 0, 10, 10) });
+  const dashed = C.addShape(d, { type: 'path', fill: '#ff0000', stroke: { color: '#000000', w: 2, dash: [4, 2] }, cmds: C.rectPath(60, 0, 10, 10) });
+  C.applyAppearance(d, [dashed.id], C.shapeAppearance(noDash));
+  ok(dashed.stroke.dash === undefined, 'a solid source clears the target dash');
+  ok(C.applyAppearance(d, [dashed.id], C.shapeAppearance(noDash), { opacity: false }) === undefined &&
+    near(dashed.opacity, 1), 'opacity can be held back');
+  ok(C.strokeAttrs(null) === null, 'no stroke, no attributes');
+}
+
 // ---- swatches ----
 {
   const d = C.newDoc();

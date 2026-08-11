@@ -595,6 +595,40 @@ const VECCORE = (() => {
     eachShape(doc, ids, s => { s.opacity = v; });
   }
 
+  // Everything about how a shape looks, in the form the setters take it back
+  // in. This is what the eyedropper carries: the print info rides along, so
+  // sampling a spot ink hands back the ink rather than a flattened preview.
+  function strokeAttrs(stroke) {
+    if (!stroke) return null;
+    return {
+      w: stroke.w,
+      cap: strokeProp(stroke, 'cap'),
+      join: strokeProp(stroke, 'join'),
+      miter: strokeProp(stroke, 'miter'),
+      align: strokeProp(stroke, 'align'),
+      dash: stroke.dash ? stroke.dash.slice() : [], // empty clears a dash on the target
+    };
+  }
+
+  function shapeAppearance(s) {
+    return {
+      fill: paintColor(s.fill, s.fillInfo),
+      stroke: s.stroke ? paintColor(s.stroke.color, s.strokeInfo) : null,
+      strokeAttrs: strokeAttrs(s.stroke),
+      opacity: s.opacity == null ? 1 : s.opacity,
+    };
+  }
+
+  // Paint an appearance onto a selection. Stroke color goes on before the
+  // attributes, because a shape that had no stroke only grows one at the
+  // colour step and setStrokeProps deliberately skips shapes without.
+  function applyAppearance(doc, ids, ap, opts = {}) {
+    setFill(doc, ids, ap.fill);
+    setStroke(doc, ids, ap.stroke);
+    if (ap.strokeAttrs) setStrokeProps(doc, ids, ap.strokeAttrs);
+    if (opts.opacity !== false && ap.opacity != null) setOpacity(doc, ids, ap.opacity);
+  }
+
   // Shift+X: every shape trades its own fill for its own stroke color, so a
   // mixed selection stays meaningful instead of collapsing to one pair.
   function swapFillStroke(doc, ids) {
@@ -1150,6 +1184,7 @@ const VECCORE = (() => {
     clamp01, hexToRgb, rgbToHex, cmykToRgb, rgbToCmyk, rgbToHsb, hsbToRgb, spaceToRgb,
     makeColor, colorHex, colorInfo, paintColor, colorEquals,
     setFill, setStroke, setStrokeProps, setOpacity, swapFillStroke, parseDash, strokeProp,
+    strokeAttrs, shapeAppearance, applyAppearance,
     OFFSET_TOL, flattenAdaptive, subpathArea, offsetPath, strokeOffsetPath,
     makeSwatch, swatchKey, swatchColor, findSwatch, addSwatch, removeSwatch, renameSwatch,
     defaultSwatches, defaultSwatchName,
