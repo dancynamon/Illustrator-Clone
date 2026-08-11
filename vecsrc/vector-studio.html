@@ -7018,10 +7018,9 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     b.addEventListener('click', () => setTool(b.dataset.tool)));
 
   // ---------- drawing tools (rect / ellipse / pen) ----------
-  // Ai's default appearance for freshly drawn art. Pen paths come out stroke-
-  // only so an open path reads as a line rather than a white blob.
-  function newFill() { return { fill: '#ffffff', stroke: { color: '#1d1d1b', w: 1 } }; }
-  function newStroke() { return { fill: null, stroke: { color: '#1d1d1b', w: 1 } }; }
+  // Ai's default appearance for freshly drawn art — every tool draws with it,
+  // open pen paths included.
+  function newStyle() { return { fill: '#ffffff', stroke: { color: '#1d1d1b', w: 1 } }; }
 
   // Screen-pixel pick radius expressed in world units, so tolerances feel the
   // same at every zoom level.
@@ -7064,7 +7063,7 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     const r = drawnRect(d);
     // a click (or a hairline drag) draws nothing, like Ai
     if (r.w * state.view.scale >= 1 && r.h * state.view.scale >= 1) {
-      addDrawnShape(d.tool === 'rect' ? 'Rectangle' : 'Ellipse', drawnCmds(d), newFill());
+      addDrawnShape(d.tool === 'rect' ? 'Rectangle' : 'Ellipse', drawnCmds(d), newStyle());
     }
     render();
   }
@@ -7080,7 +7079,7 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     if (!p) return;
     if (close) p.closed = true;
     if (p.anchors.length >= 2) {
-      addDrawnShape('Path', C.anchorsToPath([{ anchors: p.anchors, closed: p.closed }]), newStroke());
+      addDrawnShape('Path', C.anchorsToPath([{ anchors: p.anchors, closed: p.closed }]), newStyle());
     }
     render();
   }
