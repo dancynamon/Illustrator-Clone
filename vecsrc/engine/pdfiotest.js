@@ -181,6 +181,22 @@ function cmdBBox(cmds) { return C.tightBBox(cmds); }
       'export: fill+stroke round-trip');
     ok(ell.subpaths[0].segments.every(s => s.type === 'cubic'), 'export: ellipse cubics kept');
     ok(cyan.fill.space === 'cmyk' && near(cyan.fill.values[0], 1), 'export: CMYK written natively');
+
+    // a piece on colored stock exports on that stock, so the file looks like
+    // the thing being made instead of like artwork floating on white
+    doc.substrate = '#1f4e79';
+    const onFoam = await VecPDF.parsePDF(PDFIO.exportDocPDF(doc));
+    const shapes = onFoam.pages[0].shapes;
+    ok(shapes.length === 4, 'export: substrate adds one panel under the art');
+    const back = shapes[0];
+    ok(back.fill.space === 'cmyk' && near(back.fill.rgb[2], 0.4745),
+      'export: the substrate is written as a print color');
+    const bb = cmdBBox(PDFIO.cmdsFromSubpaths(back.subpaths));
+    ok(near(bb.x, 0) && near(bb.y, 0) && near(bb.w, 360) && near(bb.h, 288),
+      'export: the substrate covers the artboard');
+    doc.substrate = '#ffffff';
+    ok((await VecPDF.parsePDF(PDFIO.exportDocPDF(doc))).pages[0].shapes.length === 3,
+      'export: white paper is not a material and adds nothing');
   }
 
   // ---- export: spot inks stay plates, not RGB ----

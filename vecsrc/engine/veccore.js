@@ -22,6 +22,9 @@ const VECCORE = (() => {
       name: o.name || 'Untitled',
       units,
       artboard: { w: (o.w != null ? o.w : 8.5) * k, h: (o.h != null ? o.h : 11) * k },
+      // Material the piece prints on: hex, or null for white paper. Foam and
+      // signage jobs run on colored stock, and white ink only reads on it.
+      substrate: o.substrate || null,
       layers: [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }],
       shapes: [],
       groups: [],
@@ -1458,6 +1461,7 @@ const VECCORE = (() => {
       || d.artboard.w <= 0 || d.artboard.h <= 0) throw new Error('bad artboard');
     if (!PT_PER[d.units]) d.units = 'in';
     if (typeof d.name !== 'string' || !d.name) d.name = 'Untitled';
+    if (typeof d.substrate !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(d.substrate)) d.substrate = null;
     if (!Array.isArray(d.layers) || !d.layers.length) {
       d.layers = [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }];
     }

@@ -30,13 +30,15 @@
  *     fillRule: 'nonzero' | 'evenodd',
  *     overprint: true | false | undefined
  *   } ],
+ *   substrate?: color,      // material the piece prints on, painted first
  *   title?, creator?        // Info dictionary strings
  * }
  *
  * plate = {
  *   width, height,          // piece (trim) size in points
  *   ink: { name, cmyk:[c,m,y,k], type:'spot'|'process' },
- *   colorShapes: [shape],   // Color layer: the art in its own colors
+ *   substrate?: color,      // material the piece prints on, under the art
+ *   colorShapes: [shape],   // Color layer: the whole artwork, own colors
  *   spotShapes:  [ {subpaths, fillTint, strokeTint, strokeWidth,
  *                   fillRule, overprint} ],   // Spot layer: the ink itself
  *   marks?: true,           // crop + registration marks and ink label
@@ -261,6 +263,12 @@ function buildContent(doc, res) {
   // written exactly as stored. All geometry goes inside this one q/Q.
   lines.push('q');
   lines.push('1 0 0 -1 0 ' + fmt(doc.height) + ' cm');
+  // Colored stock goes down first, so artwork reads against the material it
+  // prints on rather than against the page. White paper adds nothing.
+  if (doc.substrate) {
+    lines.push('q', colorOps(doc.substrate, false, res),
+      '0 0 ' + fmt(doc.width) + ' ' + fmt(doc.height) + ' re', 'f', 'Q');
+  }
   for (const shape of doc.shapes || []) {
     if (!shape || !shape.subpaths || !shape.subpaths.length) continue;
     if (!shape.fill && !shape.stroke) continue;
@@ -417,7 +425,8 @@ function marksContent(plate, res, m, W, H) {
   // outside that range would come out as a blank on the press proof.
   const label = plate.label || (plate.ink.name + '  |  ' + (plate.ink.type === 'spot' ? 'SPOT' : 'PROCESS'));
   const detail = (plate.title ? plate.title + '  |  ' : '') +
-    fmt(pw / 72) + ' x ' + fmt(ph / 72) + ' in';
+    fmt(pw / 72) + ' x ' + fmt(ph / 72) + ' in' +
+    (plate.substrateName ? '  |  on ' + plate.substrateName : '');
   L.push('BT', '/F1 ' + LABEL_PT + ' Tf',
     '1 0 0 1 ' + fmt(m) + ' ' + fmt(Math.max(3, m / 2 - LABEL_PT)) + ' Tm',
     '(' + escapePdfString(label) + ') Tj', 'ET');
@@ -450,8 +459,16 @@ function exportPlatePDF(plate) {
   // piece space: art coordinates are top-left origin, y-down, inside the trim
   L.push('1 0 0 -1 ' + fmt(m) + ' ' + fmt(H - m) + ' cm');
 
-  // Color layer first (underneath), in the artwork's own colors.
+  // Color layer first (underneath): the whole artwork in its own colors, so
+  // the plate can be checked against the job it was separated from.
   L.push('/OC /oc_color BDC');
+  // On colored stock the material goes down first. It is not ink — it never
+  // reaches the Spot layer — but without it white ink is invisible against
+  // the page and the reference layer lies about what the piece looks like.
+  if (plate.substrate) {
+    L.push('q', colorOps(plate.substrate, false, res),
+      '0 0 ' + fmt(plate.width) + ' ' + fmt(plate.height) + ' re', 'f', 'Q');
+  }
   for (const s of plate.colorShapes || []) {
     if (!s || !s.subpaths || !s.subpaths.length) continue;
     if (!s.fill && !s.stroke) continue;
@@ -459,8 +476,9 @@ function exportPlatePDF(plate) {
   }
   L.push('EMC');
 
-  // Spot layer on top: the same geometry as this one ink, overprinting by
-  // default (house convention) so the plate composites instead of erasing.
+  // Spot layer on top: only what this ink prints, as this one ink,
+  // overprinting by default (house convention) so it composites over the
+  // reference art instead of erasing it. This layer alone is the plate.
   L.push('/OC /oc_spot BDC');
   L.push(gsRes(res, 'op') + ' gs');
   const sepCol = t => ({

@@ -15,6 +15,11 @@
 //
 // Overprint is a per-shape tri-state: shape.overprint === true (overprint),
 // === false (knockout), undefined (inherit the plate default).
+//
+// doc.substrate is the material the piece prints on (hex, or null for white
+// paper). It is never an ink and never reaches a plate's Spot layer; it only
+// backs the reference art, because white ink on blue foam is invisible
+// against white and obvious against the foam.
 const SEPARATE = (() => {
   'use strict';
 
@@ -202,6 +207,8 @@ const SEPARATE = (() => {
 
   // ---------- plates ----------
   // One plate per ink, holding only the geometry that actually uses that ink.
+  // (The plate PDF pairs this with a reference layer carrying the full
+  // artwork — see pdfio.platePDFDoc — but a plate's entries are ink only.)
   //
   // Knockout: an object that does NOT use the ink but sits above ink geometry
   // and overlaps it still punches a hole in the plate unless it overprints —
@@ -248,6 +255,30 @@ const SEPARATE = (() => {
     const base = String((doc && doc.name) || 'Untitled').replace(/[\\/:*?"<>|]+/g, '-').trim();
     const nm = String(ink.name).replace(/[\\/:*?"<>|]+/g, '-').trim();
     return base + '_' + nm + '_spot+color.pdf';
+  }
+
+  // ---------- substrate ----------
+  const PAPER = '#ffffff';
+
+  function substrateOf(doc) { // null when the piece runs on white paper
+    const hex = doc && doc.substrate;
+    if (typeof hex !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
+    return hex.toLowerCase() === PAPER ? null : hex.toLowerCase();
+  }
+
+  function setSubstrate(doc, hex) {
+    if (hex == null) { doc.substrate = null; return true; }
+    if (typeof hex !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
+    doc.substrate = hex.toLowerCase();
+    return true;
+  }
+
+  // Substrate as a print color, so the reference layer stays free of RGB.
+  function substrateColor(doc) {
+    const hex = substrateOf(doc);
+    if (!hex) return null;
+    const rgb = hexToRgb(hex);
+    return { space: 'cmyk', values: rgbToCmyk(rgb), rgb };
   }
 
   // ---------- ink management ----------
@@ -393,6 +424,8 @@ const SEPARATE = (() => {
 
   // ---------- preflight ----------
   // Everything that bites on press, checked before plates go out the door.
+  // An issue carries scope:'flat' when it only concerns the flat artboard
+  // PDF and has no bearing on plates, so plate export can skip it.
   function preflight(doc, opts = {}) {
     const minStroke = opts.minStroke != null ? opts.minStroke : HAIRLINE_PT;
     const issues = [];
@@ -400,6 +433,17 @@ const SEPARATE = (() => {
 
     if (!shapes.length) {
       issues.push({ level: 'error', code: 'empty', message: 'Nothing to print: no visible artwork.', ids: [] });
+    }
+
+    const substrate = substrateOf(doc);
+    if (substrate) {
+      issues.push({
+        level: 'warn', code: 'substrate', scope: 'flat',
+        message: 'Substrate ' + substrate + ' is set, so a flat PDF export lays it down ' +
+          'as a full-bleed flood. Fine for a proof; switch to Paper before sending ' +
+          'artwork to a printer. Plates are unaffected.',
+        ids: [],
+      });
     }
 
     const rgbIds = [];
@@ -462,6 +506,7 @@ const SEPARATE = (() => {
     hexToRgb, rgbToHex, rgbToCmyk, cmykToRgb, cmykToHex,
     colorInks, shapeInks, shapeColors, printableShapes, spotSwatches,
     documentInks, findInk, previewHex, separatePlates, plateFilename,
+    PAPER, substrateOf, setSubstrate, substrateColor,
     renameInk, convertSpotToProcess, convertProcessToSpot, mergeInks, deleteInk,
     registerSwatch, setOverprint, preflight,
   };

@@ -476,7 +476,7 @@
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,.55)';
     ctx.shadowBlur = 18; ctx.shadowOffsetY = 4;
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = SEP.substrateOf(state.doc) || SEP.PAPER;
     ctx.fillRect(ax, ay, aw, ah);
     ctx.restore();
 
@@ -1735,6 +1735,10 @@
       ul.appendChild(li);
     }
 
+    const sub = SEP.substrateOf(state.doc);
+    $('#substrate-color').value = sub || SEP.PAPER;
+    $('#substrate-none').classList.toggle('on', !sub);
+
     const ink = selectedInk();
     $('#ink-all').classList.toggle('on', !state.inkVisible);
     $('#ink-rename').disabled = !ink || ink.type !== 'spot';
@@ -1794,6 +1798,12 @@
     state.issues = SEP.preflight(state.doc);
     renderPreflight();
     return state.issues;
+  }
+
+  // The substrate is the material, not an ink: it backs the artwork on
+  // canvas and under a plate's Color layer, and never lands on a plate.
+  function setSubstrate(hex) {
+    mutate(d => SEP.setSubstrate(d, hex));
   }
 
   function setSelOverprint(mode) {
@@ -1866,7 +1876,9 @@
   // One PDF per ink, downloaded back to back. Preflight warnings are shown
   // first so nobody plates a job with RGB or hairlines still in it.
   function exportPlates() {
-    const issues = doPreflight();
+    // The panel shows every preflight issue; the plate prompt only raises the
+    // ones plates can actually be hurt by.
+    const issues = doPreflight().filter(i => i.scope !== 'flat');
     const blocking = issues.filter(i => i.level === 'error');
     if (blocking.length) { window.alert('Cannot plate:\n\n' + blocking.map(i => '· ' + i.message).join('\n')); return; }
     if (issues.length && !window.confirm('Preflight found:\n\n' +
@@ -1884,6 +1896,8 @@
     return plates;
   }
 
+  $('#substrate-color').addEventListener('input', e => setSubstrate(e.target.value));
+  $('#substrate-none').addEventListener('click', () => setSubstrate(null));
   $('#ink-all').addEventListener('click', () => setInkVisible(null));
   $('#ink-rename').addEventListener('click', doRenameInk);
   $('#ink-convert').addEventListener('click', doConvertInk);
@@ -2671,7 +2685,7 @@
     placeImage, addPlacedImage, selectedImage, bitmapOf, traceOpts,
     runTracePreview, expandTrace, applyPreset,
     SEPARATE: SEP, PDFIO, docInks, setInkVisible, toggleInk, renderSeparations,
-    doPreflight, exportPlates, setSelOverprint,
+    doPreflight, exportPlates, setSelOverprint, setSubstrate,
     doRenameInk, doConvertInk, doMergeInk, doDeleteInk,
   };
 })();

@@ -191,6 +191,12 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
       'plate pdf: exactly two marked-content blocks');
     ok(/\/OP true \/op true \/OPM 1/.test(src), 'plate pdf: overprint ExtGState present');
 
+    const colorLayer = src.slice(src.indexOf('/OC /oc_color BDC'), src.indexOf('EMC'));
+    ok(/ k\b/.test(colorLayer) && / rg\b/.test(colorLayer) && /\/CS\d+ cs/.test(colorLayer),
+      'plate pdf: the Color layer keeps the whole job in its own colors');
+    ok(colorLayer.split('\n').filter(l => /^[fBS]\*?$/.test(l)).length === 4,
+      'plate pdf: all four objects are on the Color layer for reference');
+
     const spotLayer = src.slice(src.indexOf('/OC /oc_spot BDC'), src.indexOf('EMC', src.indexOf('/OC /oc_spot BDC')));
     ok(!/ rg\b/.test(spotLayer) && !/ RG\b/.test(spotLayer), 'plate pdf: no RGB survives in the Spot layer');
     ok(!/ k\b/.test(spotLayer) && !/ K\b/.test(spotLayer), 'plate pdf: no process build in the Spot layer either');
@@ -212,35 +218,90 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
     const doc = jobDoc();
     const plates = PDFIO.exportPlatePDFs(doc, { marks: false });
 
+    // Color layer = the whole 4-object job for reference, Spot layer = the
+    // one object this ink prints. Both come back in the same content stream,
+    // Color first, so the last shape is the plate itself.
     const white = plates.find(p => p.ink.key === 'WHITE');
     const re = await PDFIO.docFromPDF(white.bytes, 'white.pdf');
     ok(near(re.doc.artboard.w, 864) && near(re.doc.artboard.h, 576),
       'round trip: plate reimports at true piece size');
-    const sep = re.doc.shapes.filter(s => s.fillInfo && s.fillInfo.space === 'separation');
-    ok(sep.length >= 1 && sep.every(s => s.fillInfo.name === 'WHITE'),
+    ok(re.doc.shapes.length === 5, 'round trip: 4 reference objects + 1 inked object');
+    const plateShape = re.doc.shapes[re.doc.shapes.length - 1];
+    ok(plateShape.fillInfo && plateShape.fillInfo.space === 'separation' &&
+      plateShape.fillInfo.name === 'WHITE',
       'round trip: spot ink name survives export -> reimport');
-    ok(near(sep[0].fillInfo.values[0], 1), 'round trip: tint survives');
+    ok(near(plateShape.fillInfo.values[0], 1), 'round trip: tint survives');
     ok(re.doc.swatches.some(s => s.name === 'WHITE'), 'round trip: the ink lands in the palette');
-    // both layers carry the same rectangle, in the same place
-    const b = C.tightBBox(re.doc.shapes[0].cmds);
+    const b = C.tightBBox(plateShape.cmds);
     ok(near(b.x, 72) && near(b.y, 72) && near(b.w, 288) && near(b.h, 144),
       'round trip: geometry lands at the same coordinates');
-    ok(re.doc.shapes.length === 2, 'round trip: Color + Spot copies of the one object');
+    // the reference layer carries the rest of the job, other inks included
+    const refInks = re.doc.shapes.slice(0, 4).map(s => s.fillInfo && s.fillInfo.name);
+    ok(refInks[0] === 'WHITE' && refInks[1] === 'PANTONE 185 C',
+      'round trip: Color layer holds the full artwork, other inks and all');
+    ok(re.doc.shapes.slice(0, 4).some(s => !s.fillInfo),
+      'round trip: ...including the RGB object');
 
     const pms = plates.find(p => p.ink.key === 'PANTONE 185 C');
     const re2 = await PDFIO.docFromPDF(pms.bytes, 'pms.pdf');
-    const s2 = re2.doc.shapes.find(s => s.fillInfo && s.fillInfo.space === 'separation');
+    ok(re2.doc.shapes.length === 5, 'round trip: the spot red plate inks one object');
+    const s2 = re2.doc.shapes[re2.doc.shapes.length - 1];
     ok(s2.fillInfo.name === 'PANTONE 185 C', 'round trip: spaces in the ink name survive (#20 escaping)');
     ok(s2.fillInfo.alt && near(s2.fillInfo.alt.values[1], 0.91) && near(s2.fillInfo.alt.values[2], 0.76),
       'round trip: the ink alternate comes back identical, not via RGB');
+    ok(near(C.tightBBox(s2.cmds).x, 468), 'round trip: only the spot red geometry is inked');
 
     // a blank ink would render invisible, so the Spot layer's preview
     // alternate moves — the artwork's own color is left exactly as authored
     const reWhite = await VecPDF.parsePDF(white.bytes);
-    const cols = reWhite.pages[0].shapes.map(s => s.fill).filter(f => f && f.space === 'separation');
-    ok(cols.length === 2 && cols.every(f => f.name === 'WHITE'), 'round trip: both layers print WHITE');
+    const cols = reWhite.pages[0].shapes.map(s => s.fill).filter(f => f && f.name === 'WHITE');
+    ok(cols.length === 2, 'round trip: WHITE appears once for reference and once as the plate');
     ok(cols[0].alt.values.every(v => v === 0), 'round trip: Color layer keeps the ink as authored');
     ok(cols[1].alt.values[3] > 0, 'round trip: blank white ink gets a visible preview alternate on the Spot layer');
+  }
+
+  // ---- substrate: the material under the reference art ----
+  {
+    const doc = jobDoc();
+    ok(S.substrateOf(doc) === null, 'substrate: a document defaults to white paper');
+    ok(S.setSubstrate(doc, '#1F4E79') === true && S.substrateOf(doc) === '#1f4e79',
+      'substrate: set from a hex color');
+    ok(S.setSubstrate(doc, 'blue') === false && S.substrateOf(doc) === '#1f4e79',
+      'substrate: junk is refused, the old value stands');
+    ok(C.parseDoc(C.serializeDoc(doc)).substrate === '#1f4e79',
+      'substrate: survives .aqv serialize/parse');
+
+    const plate = PDFIO.exportPlatePDFs(doc, { marks: false }).find(p => p.ink.key === 'WHITE');
+    const src = latin1(plate.bytes);
+    const colorLayer = src.slice(src.indexOf('/OC /oc_color BDC'), src.indexOf('EMC'));
+    const spotLayer = src.slice(src.indexOf('/OC /oc_spot BDC'), src.indexOf('EMC', src.indexOf('/OC /oc_spot BDC')));
+    ok(/0\.7438 0\.3554 0 0\.5255 k\n0 0 864 576 re/.test(colorLayer),
+      'substrate: the Color layer starts on a piece-size panel of the material');
+    ok(colorLayer.indexOf('0 0 864 576 re') < colorLayer.indexOf('72 72 m'),
+      'substrate: the material goes down before the artwork');
+    ok(colorLayer.split('\n').filter(l => /^[fBS]\*?$/.test(l)).length === 5,
+      'substrate: material + the four art objects');
+    ok(!/0 0 864 576 re/.test(spotLayer), 'substrate: the material never reaches the plate');
+
+    // and the white panel now paints white over it instead of vanishing
+    const re = await PDFIO.docFromPDF(plate.bytes, 'white.pdf');
+    const back = C.tightBBox(re.doc.shapes[0].cmds);
+    ok(re.doc.shapes[0].fillInfo.space === 'cmyk' && near(back.w, 864) && near(back.h, 576),
+      'substrate: it reimports as a CMYK panel at piece size');
+    ok(re.doc.shapes[0].fill === '#1f4e79', 'substrate: the material color round-trips');
+    ok(re.doc.shapes[1].fillInfo.name === 'WHITE',
+      'substrate: the white panel sits on top of it, visible');
+
+    // marks on: the plate label names the stock
+    const marked = PDFIO.exportPlatePDFs(doc).find(p => p.ink.key === 'WHITE');
+    ok(/on #1f4e79/.test(latin1(marked.bytes)), 'substrate: the ink label names the stock');
+
+    // back to paper and the extra panel is gone again
+    S.setSubstrate(doc, null);
+    const bare = PDFIO.exportPlatePDFs(doc, { marks: false }).find(p => p.ink.key === 'WHITE');
+    ok(!/0 0 864 576 re/.test(latin1(bare.bytes)), 'substrate: white paper adds nothing');
+    ok(S.setSubstrate(doc, '#ffffff') && S.substrateOf(doc) === null,
+      'substrate: plain white counts as paper, not a material');
   }
 
   // ---- overprint flags are preserved through the plate writer ----
@@ -328,6 +389,16 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
     ok(S.preflight(doc, { minStroke: 0.05 }).every(i => i.code !== 'hairline'),
       'preflight: the hairline threshold is tunable');
     ok(S.preflight(processOnlyDoc()).length === 0, 'preflight: a clean process job passes');
+
+    // a substrate is legitimate, but it floods the flat export — say so
+    const onFoam = processOnlyDoc();
+    ok(S.preflight(onFoam).every(i => i.code !== 'substrate'),
+      'preflight: white paper raises nothing');
+    S.setSubstrate(onFoam, '#1f4e79');
+    const sub = S.preflight(onFoam).find(i => i.code === 'substrate');
+    ok(sub && sub.level === 'warn' && /#1f4e79/.test(sub.message),
+      'preflight: flags a substrate and names it');
+    ok(sub.scope === 'flat', 'preflight: ...scoped to the flat export, so plate export ignores it');
     ok(S.preflight(C.newDoc()).some(i => i.code === 'empty'), 'preflight: an empty artboard is an error');
   }
 
