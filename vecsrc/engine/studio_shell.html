@@ -85,7 +85,8 @@
   #stagewrap.tool-zoom #stage { cursor: zoom-in; }
   #stagewrap.tool-pen #stage,
   #stagewrap.tool-rect #stage,
-  #stagewrap.tool-ellipse #stage { cursor: crosshair; }
+  #stagewrap.tool-ellipse #stage,
+  #stagewrap.tool-eyedrop #stage { cursor: crosshair; }
   #stagewrap.tool-pen.pen-close #stage { cursor: pointer; } /* click closes the path */
 
   /* ---- right panels ---- */
@@ -163,6 +164,26 @@
   .fscol { flex: 1; min-width: 0; }
   .fscol .pbtns { margin-top: 0; }
   #fs-ink { color: var(--text-dim); padding: 3px 0 0; min-height: 16px; }
+
+  /* color picker: saturation/brightness square beside a hue strip. The
+     markers are elements over the canvases rather than drawn into them, so a
+     repaint only costs a style write unless the hue itself moved. */
+  .picker { display: flex; gap: 6px; margin: 8px 0 6px; }
+  .picker .sq, .picker .strip {
+    position: relative; height: 124px; border: 1px solid #4a4a4a; background: #000;
+  }
+  .picker .sq { flex: 1; min-width: 0; }
+  .picker .strip { width: 14px; flex: none; }
+  .picker canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  #col-sb-dot {
+    position: absolute; width: 11px; height: 11px; margin: -6px 0 0 -6px; border-radius: 50%;
+    border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75), inset 0 0 0 1px rgba(0,0,0,.45);
+    pointer-events: none;
+  }
+  #col-hue-bar {
+    position: absolute; left: -3px; right: -3px; height: 3px; margin-top: -1.5px;
+    border: 1px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none;
+  }
 
   /* color picker rows */
   .crow { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
@@ -340,7 +361,12 @@
     padding: 0 12px; color: var(--text-dim); font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
-  #statusbar .right { margin-left: auto; display: flex; gap: 18px; }
+  #statusbar .right { margin-left: auto; display: flex; gap: 18px; align-items: center; }
+  /* what the eyedropper is over, shown only while it is the active tool */
+  #s-sample { display: none; align-items: center; gap: 6px; }
+  #statusbar.sampling #s-sample { display: flex; }
+  #s-sample i { display: block; width: 11px; height: 11px; border: 1px solid #6a6a6a; }
+  #s-sample b { font-weight: 400; color: var(--text); }
 </style>
 </head>
 <body>
@@ -370,6 +396,12 @@
   </button>
   <button data-tool="ellipse" title="Ellipse (L)">
     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="10" cy="10" rx="6.5" ry="5"/></svg>
+  </button>
+  <button data-tool="eyedrop" title="Eyedropper (I) — click samples the whole appearance, Shift-click just the color">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+      <path d="M13.2 2.9a2.4 2.4 0 0 1 3.4 3.4l-1.9 1.9-3.4-3.4z"/>
+      <path d="M12.4 5.6 4.5 13.5 3.3 16.7 6.5 15.5 14.4 7.6"/>
+    </svg>
   </button>
   <div class="sep"></div>
   <button data-tool="hand" title="Hand (H) — or hold Space">
@@ -505,6 +537,14 @@
               <option value="hsb">HSB</option>
             </select>
           </div>
+        </div>
+      </div>
+      <div class="picker">
+        <div class="sq" title="Saturation and brightness">
+          <canvas id="col-sb"></canvas><i id="col-sb-dot"></i>
+        </div>
+        <div class="strip" title="Hue">
+          <canvas id="col-hue"></canvas><i id="col-hue-bar"></i>
         </div>
       </div>
       <div id="col-sliders"></div>
@@ -668,6 +708,7 @@
 <div id="statusbar">
   <span id="s-coords">x: — y: —</span>
   <div class="right">
+    <span id="s-sample"><i></i><b>—</b></span>
     <span id="s-tool">Selection</span>
     <span id="s-zoom">100%</span>
   </div>

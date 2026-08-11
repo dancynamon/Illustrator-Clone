@@ -85,7 +85,8 @@
   #stagewrap.tool-zoom #stage { cursor: zoom-in; }
   #stagewrap.tool-pen #stage,
   #stagewrap.tool-rect #stage,
-  #stagewrap.tool-ellipse #stage { cursor: crosshair; }
+  #stagewrap.tool-ellipse #stage,
+  #stagewrap.tool-eyedrop #stage { cursor: crosshair; }
   #stagewrap.tool-pen.pen-close #stage { cursor: pointer; } /* click closes the path */
 
   /* ---- right panels ---- */
@@ -163,6 +164,26 @@
   .fscol { flex: 1; min-width: 0; }
   .fscol .pbtns { margin-top: 0; }
   #fs-ink { color: var(--text-dim); padding: 3px 0 0; min-height: 16px; }
+
+  /* color picker: saturation/brightness square beside a hue strip. The
+     markers are elements over the canvases rather than drawn into them, so a
+     repaint only costs a style write unless the hue itself moved. */
+  .picker { display: flex; gap: 6px; margin: 8px 0 6px; }
+  .picker .sq, .picker .strip {
+    position: relative; height: 124px; border: 1px solid #4a4a4a; background: #000;
+  }
+  .picker .sq { flex: 1; min-width: 0; }
+  .picker .strip { width: 14px; flex: none; }
+  .picker canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  #col-sb-dot {
+    position: absolute; width: 11px; height: 11px; margin: -6px 0 0 -6px; border-radius: 50%;
+    border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75), inset 0 0 0 1px rgba(0,0,0,.45);
+    pointer-events: none;
+  }
+  #col-hue-bar {
+    position: absolute; left: -3px; right: -3px; height: 3px; margin-top: -1.5px;
+    border: 1px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none;
+  }
 
   /* color picker rows */
   .crow { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
@@ -340,7 +361,12 @@
     padding: 0 12px; color: var(--text-dim); font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
-  #statusbar .right { margin-left: auto; display: flex; gap: 18px; }
+  #statusbar .right { margin-left: auto; display: flex; gap: 18px; align-items: center; }
+  /* what the eyedropper is over, shown only while it is the active tool */
+  #s-sample { display: none; align-items: center; gap: 6px; }
+  #statusbar.sampling #s-sample { display: flex; }
+  #s-sample i { display: block; width: 11px; height: 11px; border: 1px solid #6a6a6a; }
+  #s-sample b { font-weight: 400; color: var(--text); }
 </style>
 </head>
 <body>
@@ -370,6 +396,12 @@
   </button>
   <button data-tool="ellipse" title="Ellipse (L)">
     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="10" cy="10" rx="6.5" ry="5"/></svg>
+  </button>
+  <button data-tool="eyedrop" title="Eyedropper (I) — click samples the whole appearance, Shift-click just the color">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+      <path d="M13.2 2.9a2.4 2.4 0 0 1 3.4 3.4l-1.9 1.9-3.4-3.4z"/>
+      <path d="M12.4 5.6 4.5 13.5 3.3 16.7 6.5 15.5 14.4 7.6"/>
+    </svg>
   </button>
   <div class="sep"></div>
   <button data-tool="hand" title="Hand (H) — or hold Space">
@@ -505,6 +537,14 @@
               <option value="hsb">HSB</option>
             </select>
           </div>
+        </div>
+      </div>
+      <div class="picker">
+        <div class="sq" title="Saturation and brightness">
+          <canvas id="col-sb"></canvas><i id="col-sb-dot"></i>
+        </div>
+        <div class="strip" title="Hue">
+          <canvas id="col-hue"></canvas><i id="col-hue-bar"></i>
         </div>
       </div>
       <div id="col-sliders"></div>
@@ -668,6 +708,7 @@
 <div id="statusbar">
   <span id="s-coords">x: — y: —</span>
   <div class="right">
+    <span id="s-sample"><i></i><b>—</b></span>
     <span id="s-tool">Selection</span>
     <span id="s-zoom">100%</span>
   </div>
@@ -1701,6 +1742,40 @@ const VECCORE = (() => {
     eachShape(doc, ids, s => { s.opacity = v; });
   }
 
+  // Everything about how a shape looks, in the form the setters take it back
+  // in. This is what the eyedropper carries: the print info rides along, so
+  // sampling a spot ink hands back the ink rather than a flattened preview.
+  function strokeAttrs(stroke) {
+    if (!stroke) return null;
+    return {
+      w: stroke.w,
+      cap: strokeProp(stroke, 'cap'),
+      join: strokeProp(stroke, 'join'),
+      miter: strokeProp(stroke, 'miter'),
+      align: strokeProp(stroke, 'align'),
+      dash: stroke.dash ? stroke.dash.slice() : [], // empty clears a dash on the target
+    };
+  }
+
+  function shapeAppearance(s) {
+    return {
+      fill: paintColor(s.fill, s.fillInfo),
+      stroke: s.stroke ? paintColor(s.stroke.color, s.strokeInfo) : null,
+      strokeAttrs: strokeAttrs(s.stroke),
+      opacity: s.opacity == null ? 1 : s.opacity,
+    };
+  }
+
+  // Paint an appearance onto a selection. Stroke color goes on before the
+  // attributes, because a shape that had no stroke only grows one at the
+  // colour step and setStrokeProps deliberately skips shapes without.
+  function applyAppearance(doc, ids, ap, opts = {}) {
+    setFill(doc, ids, ap.fill);
+    setStroke(doc, ids, ap.stroke);
+    if (ap.strokeAttrs) setStrokeProps(doc, ids, ap.strokeAttrs);
+    if (opts.opacity !== false && ap.opacity != null) setOpacity(doc, ids, ap.opacity);
+  }
+
   // Shift+X: every shape trades its own fill for its own stroke color, so a
   // mixed selection stays meaningful instead of collapsing to one pair.
   function swapFillStroke(doc, ids) {
@@ -1723,6 +1798,279 @@ const VECCORE = (() => {
     if (!stroke) return STROKE_DEFAULTS[key];
     const v = stroke[key];
     return v == null ? STROKE_DEFAULTS[key] : v;
+  }
+
+  // ---------- path offsetting ----------
+  // An aligned stroke is a centered stroke drawn on the path pushed half its
+  // weight to one side, so inside/outside alignment needs a genuine offset
+  // path. Curves are flattened adaptively first: the offset of a cubic is not
+  // a cubic, and the self-intersection pruning below only works on polylines.
+  // OFFSET_TOL is in points, so the result is smooth well past print
+  // resolution no matter how far the shape is zoomed.
+  const OFFSET_TOL = 0.05;
+  const INNER_TRIM_CAP = 20; // how far past |d| an inner corner may reach
+
+  // Split a cubic until the control points sit within tol of the chord.
+  function flatCubic(out, x0, y0, x1, y1, x2, y2, x3, y3, tol, depth) {
+    const dx = x3 - x0, dy = y3 - y0;
+    const len = Math.hypot(dx, dy);
+    const flat = len > 1e-9
+      ? (Math.abs((x1 - x0) * dy - (y1 - y0) * dx) + Math.abs((x2 - x0) * dy - (y2 - y0) * dx)) / len
+      : Math.hypot(x1 - x0, y1 - y0) + Math.hypot(x2 - x0, y2 - y0);
+    if (flat <= tol || depth > 16) { out.push([x3, y3]); return; }
+    const x01 = (x0 + x1) / 2, y01 = (y0 + y1) / 2;
+    const x12 = (x1 + x2) / 2, y12 = (y1 + y2) / 2;
+    const x23 = (x2 + x3) / 2, y23 = (y2 + y3) / 2;
+    const xa = (x01 + x12) / 2, ya = (y01 + y12) / 2;
+    const xb = (x12 + x23) / 2, yb = (y12 + y23) / 2;
+    const xm = (xa + xb) / 2, ym = (ya + yb) / 2;
+    flatCubic(out, x0, y0, x01, y01, xa, ya, xm, ym, tol, depth + 1);
+    flatCubic(out, xm, ym, xb, yb, x23, y23, x3, y3, tol, depth + 1);
+  }
+
+  // Like flattenPath but accuracy-driven rather than fixed-step, and with
+  // duplicate points removed so every segment has a well-defined normal.
+  function flattenAdaptive(cmds, tol = OFFSET_TOL) {
+    const subs = [];
+    let cur = null, sx = 0, sy = 0, px = 0, py = 0;
+    for (const c of cmds) {
+      if (c[0] === 'M') {
+        cur = { pts: [[c[1], c[2]]], closed: false };
+        subs.push(cur);
+        px = sx = c[1]; py = sy = c[2];
+      } else if (!cur) continue;
+      else if (c[0] === 'L') { cur.pts.push([c[1], c[2]]); px = c[1]; py = c[2]; }
+      else if (c[0] === 'C') {
+        flatCubic(cur.pts, px, py, c[1], c[2], c[3], c[4], c[5], c[6], tol, 0);
+        px = c[5]; py = c[6];
+      } else if (c[0] === 'Z') { cur.closed = true; px = sx; py = sy; }
+    }
+    for (const s of subs) {
+      const p = [];
+      for (const q of s.pts) {
+        const last = p[p.length - 1];
+        if (!last || Math.abs(last[0] - q[0]) > 1e-9 || Math.abs(last[1] - q[1]) > 1e-9) p.push(q);
+      }
+      if (s.closed && p.length > 1) {
+        const a = p[0], b = p[p.length - 1];
+        if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) p.pop();
+      }
+      s.pts = p;
+    }
+    return subs.filter(s => s.pts.length > 1);
+  }
+
+  // Shoelace in y-down document space: positive area means the interior lies
+  // along the (-dy, dx) normal, which is the direction offsetPath calls "in".
+  function subpathArea(pts) {
+    let a = 0;
+    for (let i = 0, n = pts.length; i < n; i++) {
+      const p = pts[i], q = pts[(i + 1) % n];
+      a += p[0] * q[1] - q[0] * p[1];
+    }
+    return a / 2;
+  }
+
+  // Where two rays cross, or null when they are parallel.
+  function rayCross(px, py, ux, uy, qx, qy, vx, vy) {
+    const den = ux * vy - uy * vx;
+    if (Math.abs(den) < 1e-12) return null;
+    const t = ((qx - px) * vy - (qy - py) * vx) / den;
+    return [px + ux * t, py + uy * t];
+  }
+
+  // Squared, because pruning calls this hundreds of thousands of times on
+  // heavy artwork and only ever compares it against a fixed limit.
+  function ptSegDist2(x, y, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const L2 = dx * dx + dy * dy;
+    let t = L2 ? ((x - ax) * dx + (y - ay) * dy) / L2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + t * dx - x, ey = ay + t * dy - y;
+    return ex * ex + ey * ey;
+  }
+
+  // Raw offset of one polyline: every segment slides along its normal, and the
+  // gaps that opens at corners are filled with the stroke's own join, so the
+  // corners of an aligned stroke look like the corners of a centered one.
+  function offsetSubpath(pts, closed, d, join, miterLimit, tol) {
+    const n = pts.length;
+    const segs = [];
+    for (let i = 0, last = closed ? n : n - 1; i < last; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const L = Math.hypot(dx, dy);
+      if (L < 1e-9) continue;
+      segs.push({ a, b, ux: dx / L, uy: dy / L, nx: -dy / L, ny: dx / L });
+    }
+    if (!segs.length) return null;
+
+    const out = [];
+    const put = (x, y) => {
+      const p = out[out.length - 1];
+      if (!p || Math.abs(p[0] - x) > 1e-9 || Math.abs(p[1] - y) > 1e-9) out.push([x, y]);
+    };
+    const r = Math.abs(d);
+    const arcStep = r > tol ? Math.max(0.05, 2 * Math.acos(Math.max(-1, 1 - tol / r))) : Math.PI / 2;
+
+    function joinAt(p, prev, cur) {
+      const p0x = p[0] + prev.nx * d, p0y = p[1] + prev.ny * d;
+      const p1x = p[0] + cur.nx * d, p1y = p[1] + cur.ny * d;
+      const cross = prev.ux * cur.uy - prev.uy * cur.ux;
+      const dot = prev.ux * cur.ux + prev.uy * cur.uy;
+      // A turn only needs corner geometry once it opens a gap wider than tol.
+      // Below that one point covers it, which keeps a flattened curve from
+      // paying for a join at every single vertex.
+      if (dot > 0 && r * Math.abs(cross) <= tol) { put(p0x, p0y); return; }
+      // cross * d < 0 means the two offset ends pull apart and the gap is a
+      // real join; otherwise they cross and the corner trims to that crossing.
+      const gap = cross * d < 0;
+      const halfSin = Math.sqrt(Math.max(0, (1 + dot) / 2)); // sin(interior/2)
+      const withinMiter = halfSin > 1e-9 && 1 / halfSin <= miterLimit;
+      if (!gap || (join === 'miter' && withinMiter)) {
+        const ip = rayCross(p0x, p0y, prev.ux, prev.uy, p1x, p1y, cur.ux, cur.uy);
+        if (ip && Math.hypot(ip[0] - p[0], ip[1] - p[1]) <= r * INNER_TRIM_CAP) {
+          put(ip[0], ip[1]);
+          return;
+        }
+      } else if (join === 'round') {
+        const a0 = Math.atan2(p0y - p[1], p0x - p[0]);
+        let da = Math.atan2(p1y - p[1], p1x - p[0]) - a0;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        const steps = Math.max(1, Math.ceil(Math.abs(da) / arcStep));
+        for (let k = 0; k <= steps; k++) {
+          const a = a0 + da * (k / steps);
+          put(p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r);
+        }
+        return;
+      }
+      put(p0x, p0y); put(p1x, p1y); // bevel, over-limit miter, runaway corner
+    }
+
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const prev = i > 0 ? segs[i - 1] : (closed ? segs[segs.length - 1] : null);
+      if (prev) joinAt(s.a, prev, s);
+      else put(s.a[0] + s.nx * d, s.a[1] + s.ny * d);
+      put(s.b[0] + s.nx * d, s.b[1] + s.ny * d);
+    }
+    if (closed && out.length > 1) {
+      const a = out[0], b = out[out.length - 1];
+      if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) out.pop();
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  // Uniform grid over the source segments, so pruning does not have to measure
+  // every offset point against every source segment. Cells are 2·|d| across
+  // and each segment is sampled every half cell, which puts any source within
+  // |d| of a query point in the 3×3 block around that point's own cell.
+  // Segment endpoints live in one flat array and cells key on a packed integer
+  // — pruning runs per offset point, so allocation is what costs here.
+  const GRID_BIAS = 1 << 20;
+
+  function segGrid(subs, cell) {
+    const map = new Map();
+    const xs = [];
+    const put = (key, seg) => {
+      let bucket = map.get(key);
+      if (!bucket) map.set(key, bucket = []);
+      if (bucket[bucket.length - 1] !== seg) bucket.push(seg);
+    };
+    for (const s of subs) {
+      const n = s.pts.length;
+      for (let i = 0, last = s.closed ? n : n - 1; i < last; i++) {
+        const a = s.pts[i], b = s.pts[(i + 1) % n];
+        const seg = xs.length;
+        xs.push(a[0], a[1], b[0], b[1]);
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (cell / 2)));
+        let prev = -1;
+        for (let k = 0; k <= steps; k++) {
+          const t = k / steps;
+          const key = (Math.floor((a[0] + dx * t) / cell) + GRID_BIAS) * 2 * GRID_BIAS +
+            Math.floor((a[1] + dy * t) / cell) + GRID_BIAS;
+          if (key === prev) continue;
+          prev = key;
+          put(key, seg);
+        }
+      }
+    }
+    return { cell, map, xs };
+  }
+
+  function nearSource(grid, x, y, lim2) {
+    const cell = grid.cell, xs = grid.xs;
+    const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+    for (let i = -1; i <= 1; i++) {
+      const row = (cx + i + GRID_BIAS) * 2 * GRID_BIAS;
+      for (let j = -1; j <= 1; j++) {
+        const bucket = grid.map.get(row + cy + j + GRID_BIAS);
+        if (!bucket) continue;
+        for (let k = 0; k < bucket.length; k++) {
+          const o = bucket[k];
+          if (ptSegDist2(x, y, xs[o], xs[o + 1], xs[o + 2], xs[o + 3]) < lim2) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Every point of a true offset sits exactly |d| from the source. Anything
+  // the raw offset put closer than that is inside the swept band — the loops a
+  // corner throws when the offset outruns the local feature size — so drop it
+  // and let the surviving runs bridge straight across the hole they leave.
+  function pruneOffset(raw, closed, grid, lim) {
+    const lim2 = lim * lim;
+    const keep = raw.map(p => !nearSource(grid, p[0], p[1], lim2));
+    if (keep.every(Boolean)) return raw;
+    const start = closed ? Math.max(0, keep.indexOf(false)) : 0;
+    const out = [];
+    for (let i = 0; i < raw.length; i++) {
+      const j = (start + i) % raw.length;
+      if (keep[j]) out.push(raw[j]);
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  // Offset a path by d, positive meaning toward the filled side. Returns M/L/Z
+  // commands, or null when the offset eats the shape entirely (an inside
+  // stroke wider than the shape is thick).
+  function offsetPath(cmds, d, opts = {}) {
+    const tol = opts.tol > 0 ? opts.tol : OFFSET_TOL;
+    const join = STROKE_JOINS[opts.join] ? opts.join : STROKE_DEFAULTS.join;
+    const miterLimit = opts.miterLimit > 1 ? opts.miterLimit : STROKE_DEFAULTS.miter;
+    const subs = flattenAdaptive(cmds, tol);
+    if (!subs.length) return null;
+    if (Math.abs(d) < 1e-9) return cmds.slice();
+    // Winding picks the side; a reversed outer contour flips the whole shape,
+    // while holes wind the other way already and take care of themselves.
+    let area = 0;
+    for (const s of subs) if (s.closed) area += subpathArea(s.pts);
+    const dd = area < 0 ? -d : d;
+    const lim = Math.abs(dd) - Math.max(tol * 2, Math.abs(dd) * 1e-3);
+    const grid = lim > 0 ? segGrid(subs, Math.max(2 * Math.abs(dd), 1e-6)) : null;
+    const out = [];
+    for (const s of subs) {
+      let pts = offsetSubpath(s.pts, s.closed, dd, join, miterLimit, tol);
+      if (pts && grid) pts = pruneOffset(pts, s.closed, grid, lim);
+      if (!pts || pts.length < 2) continue;
+      out.push(['M', pts[0][0], pts[0][1]]);
+      for (let i = 1; i < pts.length; i++) out.push(['L', pts[i][0], pts[i][1]]);
+      if (s.closed) out.push(['Z']);
+    }
+    return out.length ? out : null;
+  }
+
+  // The offset path an aligned stroke actually rides on, or null for a
+  // centered stroke (and for a stroke whose offset collapsed).
+  function strokeOffsetPath(cmds, stroke) {
+    const align = strokeProp(stroke, 'align');
+    if (!stroke || align === 'center' || !(stroke.w > 0)) return null;
+    return offsetPath(cmds, (align === 'inside' ? 1 : -1) * stroke.w / 2, {
+      join: strokeProp(stroke, 'join'), miterLimit: strokeProp(stroke, 'miter'),
+    });
   }
 
   // ---------- swatches ----------
@@ -2001,6 +2349,8 @@ const VECCORE = (() => {
     clamp01, hexToRgb, rgbToHex, cmykToRgb, rgbToCmyk, rgbToHsb, hsbToRgb, spaceToRgb,
     makeColor, colorHex, colorInfo, paintColor, colorEquals,
     setFill, setStroke, setStrokeProps, setOpacity, swapFillStroke, parseDash, strokeProp,
+    strokeAttrs, shapeAppearance, applyAppearance,
+    OFFSET_TOL, flattenAdaptive, subpathArea, offsetPath, strokeOffsetPath,
     makeSwatch, swatchKey, swatchColor, findSwatch, addSwatch, removeSwatch, renameSwatch,
     defaultSwatches, defaultSwatchName,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
@@ -3496,6 +3846,7 @@ if (typeof module !== 'undefined' && module.exports) {
  *     stroke: {space, values, rgb, name?, alt?} | null,
  *     strokeWidth,
  *     strokeCap?, strokeJoin?, strokeMiter?, strokeDash?, strokeAlign?,
+ *     strokeOffsetPath?,    // subpaths an inside/outside stroke rides on
  *     opacity?,             // 0..1, constant alpha
  *     fillRule: 'nonzero' | 'evenodd',
  *     overprint: true | false | undefined
@@ -3673,12 +4024,16 @@ function subpathsBBox(subpaths) {
   return x0 === Infinity ? { x: 0, y: 0, w: 0, h: 0 } : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
-// Inside/outside strokes: PDF only centers strokes, so draw at double weight
-// clipped to the shape (inside) or to everything but the shape (outside) —
-// the same construction Illustrator writes for aligned strokes. Caps and joins
-// come out at that doubled size, which only shows on open or dashed paths.
+// Inside/outside strokes: PDF only centers strokes, so an aligned stroke is a
+// centered stroke on shape.strokeOffsetPath — the path pushed half a weight to
+// that side — which keeps caps, joins and dashes at their true size. The clip
+// stays as a backstop against the stroke leaking across the edge where the
+// shape is thinner than the stroke, and carries the whole job when the offset
+// collapsed and there is no offset path to ride.
+// strokeCol is passed through so a separation plate can restate the ink.
 function alignedStrokeOps(shape, res, strokeCol) {
   const align = shape.strokeAlign;
+  const off = shape.strokeOffsetPath;
   const lines = ['q'];
   if (align === 'inside') {
     lines.push(...pathOps(shape.subpaths));
@@ -3691,8 +4046,13 @@ function alignedStrokeOps(shape, res, strokeCol) {
     lines.push(...pathOps(shape.subpaths));
     lines.push('W* n'); // even-odd against the enclosing rect = outside only
   }
-  lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res, strokeCol));
-  lines.push(...pathOps(shape.subpaths));
+  if (off && off.length) {
+    lines.push(...strokeStateOps(shape, res, strokeCol));
+    lines.push(...pathOps(off));
+  } else {
+    lines.push(...strokeStateOps({ ...shape, strokeWidth: (shape.strokeWidth || 1) * 2 }, res, strokeCol));
+    lines.push(...pathOps(shape.subpaths));
+  }
   lines.push('S', 'Q');
   return lines;
 }
@@ -4156,6 +4516,12 @@ const PDFIO = (() => {
       o.strokeMiter = C.strokeProp(s.stroke, 'miter');
       o.strokeAlign = C.strokeProp(s.stroke, 'align');
       if (s.stroke.dash) o.strokeDash = s.stroke.dash.slice();
+      // An aligned stroke exports as a centered stroke on the real offset
+      // path; the writer only falls back to fattening-and-clipping when the
+      // offset collapses. Offsetting lives in veccore, so it is resolved
+      // here rather than inside the (veccore-free) PDF writer.
+      const off = C.strokeOffsetPath(s.cmds, s.stroke);
+      if (off) o.strokeOffsetPath = subpathsFromCmds(off);
     }
     if (s.overprint != null) o.overprint = !!s.overprint;
     return o;
@@ -5165,9 +5531,13 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
 
   const TOOLS = {
     select: 'Selection', direct: 'Direct Selection', pen: 'Pen',
-    rect: 'Rectangle', ellipse: 'Ellipse', hand: 'Hand', zoom: 'Zoom',
+    rect: 'Rectangle', ellipse: 'Ellipse', eyedrop: 'Eyedropper',
+    hand: 'Hand', zoom: 'Zoom',
   };
-  const TOOL_KEYS = { v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', h: 'hand', z: 'zoom' };
+  const TOOL_KEYS = {
+    v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', i: 'eyedrop',
+    h: 'hand', z: 'zoom',
+  };
 
   const AUTOSAVE_KEY = 'aqvec_autosave';
 
@@ -5200,6 +5570,7 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     paint: null,         // {fill, stroke} current paints — null means "none"
     pick: null,          // {fill, stroke} last real color per target, for the picker
     colorModel: 'rgb',   // picker entry mode: rgb | cmyk | hsb
+    hsb: [0, 0, 1],      // the picker's own hue/sat/bright (see rememberHsb)
     swatchSel: -1,       // selected swatch index in doc.swatches
     trace: {             // Image Trace panel controls + last preview result
       preset: 'color6', colors: 6, threshold: 128, tolerance: 1,
@@ -5557,12 +5928,27 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     appendPath(cmds);
   }
 
-  // Canvas only centers strokes, so inside/outside draw at double weight and
-  // clip to (or away from) the shape — the same construction the PDF exporter
-  // writes, so preview and print agree. Caps and joins render at that doubled
-  // size, which only shows on open or dashed paths; closed shapes, where
-  // alignment actually matters, are exact. The current path on entry is the
-  // shape's, left there by the fill pass.
+  // Offsetting is the costly part of an aligned stroke, so hold the last
+  // result per shape and redo it only when the geometry — or the stroke that
+  // shaped it — changes. Drags replace s.cmds outright, so identity is enough.
+  const offsetCache = new WeakMap();
+  function alignedPath(s) {
+    const st = s.stroke;
+    const key = C.strokeProp(st, 'align') + '|' + st.w + '|' +
+      C.strokeProp(st, 'join') + '|' + C.strokeProp(st, 'miter');
+    const hit = offsetCache.get(s);
+    if (hit && hit.key === key && hit.cmds === s.cmds) return hit.path;
+    const path = C.strokeOffsetPath(s.cmds, st);
+    offsetCache.set(s, { key, cmds: s.cmds, path });
+    return path;
+  }
+
+  // Canvas only centers strokes. An inside or outside stroke is a centered one
+  // riding the path offset half a weight to that side, which is what keeps
+  // caps, joins and dashes at their true size. The clip stays as a backstop:
+  // it is what stops the stroke leaking across the edge where the shape is
+  // thinner than the stroke, and it covers the case where the offset collapses
+  // altogether. The current path on entry is the shape's, left by the fill pass.
   // colorOverride carries the separation-preview ink color when one is active.
   function strokeShape(s, colorOverride) {
     const st = s.stroke;
@@ -5575,7 +5961,6 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     const align = C.strokeProp(st, 'align');
     if (align !== 'center') {
       ctx.save();
-      ctx.lineWidth = st.w * 2;
       if (align === 'inside') {
         ctx.clip();
       } else {
@@ -5586,7 +5971,9 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
         appendPath(s.cmds); // even-odd against the enclosing rect = outside only
         ctx.clip('evenodd');
       }
-      drawPath(s.cmds);
+      const off = alignedPath(s);
+      if (off) drawPath(off);
+      else { ctx.lineWidth = st.w * 2; drawPath(s.cmds); } // offset ate the shape
       ctx.stroke();
       ctx.restore();
     } else {
@@ -6174,11 +6561,30 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
           : C.rgbToCmyk(rgb);
       return v.map(x => x * 100);
     }
-    if (model === 'hsb') {
-      const h = C.rgbToHsb(rgb);
-      return [h[0], h[1] * 100, h[2] * 100];
-    }
+    // HSB reads the picker's remembered triple, not a fresh conversion, so the
+    // fields agree with the square and hue strip on colors where hue is
+    // undefined. syncPaintPanel refreshes it from the color first.
+    if (model === 'hsb') return [state.hsb[0], state.hsb[1] * 100, state.hsb[2] * 100];
     return rgb.map(x => x * 255);
+  }
+
+  // Black has no hue and no saturation, white has no hue: converting straight
+  // out of RGB would snap the square's marker to a corner and lose where the
+  // user was. Carry the undefined components over instead.
+  function rememberHsb(col) {
+    const [h, s, v] = C.rgbToHsb(col ? col.rgb : [0, 0, 0]);
+    const prev = state.hsb;
+    state.hsb = [s > 1e-6 && v > 1e-6 ? h : prev[0], v > 1e-6 ? s : prev[1], v];
+    return state.hsb;
+  }
+
+  // What the square and hue strip paint with. In CMYK entry mode the pick is
+  // converted on the way out so print work stays in CMYK.
+  function pickedColor(hsb) {
+    const rgb = C.hsbToRgb(hsb);
+    return state.colorModel === 'cmyk'
+      ? C.makeColor({ space: 'cmyk', values: C.rgbToCmyk(rgb) })
+      : C.makeColor({ space: 'rgb', values: rgb });
   }
 
   function modelToColor(vals, model) {
@@ -6249,6 +6655,85 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
   // drag or mid keystroke fights them for the caret.
   function setVal(el, v) { if (el !== document.activeElement) el.value = v; }
 
+  // ---------- hue / saturation picker ----------
+  const sbCanvas = $('#col-sb'), hueCanvas = $('#col-hue');
+  let pickerHue = null;
+
+  function sizeCanvas(cv) {
+    const r = cv.getBoundingClientRect();
+    const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+    if (cv.width === w && cv.height === h) return false;
+    cv.width = w; cv.height = h;
+    return true;
+  }
+
+  // The square is white -> full hue across, transparent -> black down: two
+  // gradients rather than a per-pixel fill, which is why it can repaint on a
+  // drag without costing anything.
+  function paintSquare(h) {
+    const g = sbCanvas.getContext('2d');
+    const w = sbCanvas.width, ht = sbCanvas.height;
+    let grad = g.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(1, C.rgbToHex(C.hsbToRgb([h, 1, 1])));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+    grad = g.createLinearGradient(0, 0, 0, ht);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, '#000000');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+  }
+
+  function paintHueStrip() {
+    const g = hueCanvas.getContext('2d');
+    const w = hueCanvas.width, ht = hueCanvas.height;
+    const grad = g.createLinearGradient(0, 0, 0, ht);
+    for (let i = 0; i <= 6; i++) grad.addColorStop(i / 6, C.rgbToHex(C.hsbToRgb([i * 60, 1, 1])));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+  }
+
+  function drawPicker() {
+    const [h, s, v] = state.hsb;
+    const grew = sizeCanvas(sbCanvas);
+    if (sizeCanvas(hueCanvas) || grew) paintHueStrip();
+    if (grew || pickerHue !== h) { pickerHue = h; paintSquare(h); }
+    const dot = $('#col-sb-dot').style;
+    dot.left = (s * 100) + '%';
+    dot.top = ((1 - v) * 100) + '%';
+    $('#col-hue-bar').style.top = (h / 360 * 100) + '%';
+  }
+
+  // Drag anywhere in a picker surface: live while the pointer is down, one
+  // history entry when it comes up, same as the component sliders.
+  function pickerDrag(el, fn) {
+    let down = false;
+    const at = e => {
+      const r = el.getBoundingClientRect();
+      const x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      const y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      state.hsb = fn(x, y);
+      pushColor(pickedColor(state.hsb), true);
+    };
+    el.addEventListener('pointerdown', e => {
+      down = true;
+      blurPanelField();
+      el.setPointerCapture(e.pointerId);
+      at(e);
+      e.preventDefault();
+    });
+    el.addEventListener('pointermove', e => { if (down) at(e); });
+    el.addEventListener('pointerup', e => {
+      if (!down) return;
+      down = false;
+      el.releasePointerCapture(e.pointerId);
+      if (C.commit(state.history, state.doc)) scheduleAutosave();
+    });
+  }
+  pickerDrag(sbCanvas, (x, y) => [state.hsb[0], x, 1 - y]);
+  pickerDrag(hueCanvas, (x, y) => [y * 360, state.hsb[1], state.hsb[2]]);
+
   const colSliders = $('#col-sliders');
   let sliderModel = null;
 
@@ -6268,6 +6753,9 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
       const push = (v, live) => {
         const vals = COLOR_MODELS[sliderModel].map((c, j) => +colSliders.children[j].children[1].value);
         vals[i] = v;
+        // HSB typed here is authoritative — take it before the color round
+        // trips, or a hue set on a gray would have nowhere to survive.
+        if (sliderModel === 'hsb') state.hsb = [vals[0], vals[1] / 100, vals[2] / 100];
         pushColor(modelToColor(vals, sliderModel), live);
       };
       range.addEventListener('input', () => push(+range.value, true));
@@ -6294,6 +6782,8 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
         col ? C.colorHex(col) : (kind === 'fill' ? '#ffffff' : '#ffffff');
     }
     const col = state.pick[state.target];
+    rememberHsb(col);
+    drawPicker();
     setVal($('#col-hex'), C.colorHex(col));
     setVal($('#col-model'), state.colorModel);
     colorToModel(col, state.colorModel).forEach((v, i) => {
@@ -6337,6 +6827,66 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     if (C.commit(state.history, state.doc)) scheduleAutosave();
   });
   $('#op-num').addEventListener('change', e => pushOpacity(+e.target.value, false));
+
+  // ---------- eyedropper ----------
+  // Sampling reads an object's own attributes rather than the pixel it
+  // painted, which is the whole point on a print document: a spot ink comes
+  // back as the ink, and a CMYK build as the build. Only empty artboard falls
+  // back to a flat colour.
+  function sampleHitAt(wx, wy) {
+    // Unlike selection this looks through locked layers — sampling only reads,
+    // so if you can see a colour you can pick it.
+    const visible = new Set(state.doc.layers.filter(l => l.visible).map(l => l.id));
+    const tol = 3 / state.view.scale;
+    for (let i = state.doc.shapes.length - 1; i >= 0; i--) {
+      const s = state.doc.shapes[i];
+      if (!visible.has(s.layer)) continue;
+      if (C.hitTestShape(s, wx, wy, tol)) return s;
+    }
+    return null;
+  }
+
+  // Bare artboard is the white it is painted with; off the artboard there is
+  // no artwork to sample and the tool does nothing.
+  function sampleAppearance(wx, wy) {
+    const hit = sampleHitAt(wx, wy);
+    if (hit) return C.shapeAppearance(hit);
+    const ab = state.doc.artboard;
+    if (wx < 0 || wy < 0 || wx > ab.w || wy > ab.h) return null;
+    return {
+      fill: C.makeColor({ space: 'cmyk', values: [0, 0, 0, 0] }),
+      stroke: null, strokeAttrs: null, opacity: 1,
+    };
+  }
+
+  // Plain click takes the whole appearance the way Illustrator's does; shift
+  // takes only the colour, into whichever well is targeted. live=true is the
+  // drag, which keeps sampling as it passes over objects and lands as a single
+  // history entry when the pointer comes up.
+  function applySample(ap, colorOnly, live) {
+    if (!ap) return;
+    if (colorOnly) {
+      pushColor(ap.fill || ap.stroke, live);
+      return;
+    }
+    state.paint = { fill: ap.fill, stroke: ap.stroke };
+    if (ap.fill) state.pick.fill = ap.fill;
+    if (ap.stroke) state.pick.stroke = ap.stroke;
+    if (state.sel.size) {
+      C.applyAppearance(state.doc, [...state.sel], ap);
+      if (!live && C.commit(state.history, state.doc)) scheduleAutosave();
+    }
+    render();
+  }
+
+  function showSample(wx, wy) {
+    const ap = sampleAppearance(wx, wy);
+    const col = ap && (ap.fill || ap.stroke);
+    $('#s-sample i').style.background = col ? C.colorHex(col) : 'transparent';
+    $('#s-sample b').textContent = col
+      ? (col.space === 'separation' ? col.name + ' · spot' : C.defaultSwatchName(col))
+      : (ap ? 'None' : '—');
+  }
 
   // ---------- stroke options ----------
   function selStroke() {
@@ -7011,6 +7561,8 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
       b.classList.toggle('active', b.dataset.tool === t));
     stagewrap.className = 'tool-' + t;
+    $('#statusbar').classList.toggle('sampling', t === 'eyedrop');
+    if (t !== 'eyedrop') $('#s-sample b').textContent = '—';
     updateReadouts();
   }
 
@@ -7327,6 +7879,15 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
       render();
       return;
     }
+    if (state.tool === 'eyedrop') {
+      if (e.button === 0) {
+        canvas.setPointerCapture(e.pointerId);
+        state.drag = { kind: 'sample', shift: e.shiftKey };
+        const [wx, wy] = worldPt(e);
+        applySample(sampleAppearance(wx, wy), e.shiftKey, true);
+      }
+      return;
+    }
     if (e.button !== 0) return;
     if (state.tool === 'rect' || state.tool === 'ellipse') { onShapeToolDown(e); return; }
     if (state.tool === 'pen') { onPenDown(e); return; }
@@ -7440,10 +8001,15 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
         d.m1 = [sx, sy];
         d.moved = true;
         render();
+      } else if (d.kind === 'sample') {
+        applySample(sampleAppearance(wx, wy), d.shift, true);
+        showSample(wx, wy);
       }
     } else if (state.tool === 'select' && !state.pan) {
       const hh = hitHandle(sx, sy);
       canvas.style.cursor = hh ? (hh.type === 'rotate' ? 'crosshair' : HANDLE_CURSOR[hh.c]) : '';
+    } else if (state.tool === 'eyedrop') {
+      showSample(wx, wy);
     }
     const k = C.PT_PER[state.doc.units];
     $('#s-coords').textContent = `x: ${(wx / k).toFixed(2)} ${state.doc.units}   y: ${(wy / k).toFixed(2)} ${state.doc.units}`;
@@ -7461,6 +8027,11 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     const d = state.drag;
     if (!d) return;
     state.drag = null;
+    if (d.kind === 'sample') {
+      commitNow(); // the whole sampling drag is one step
+      render();
+      return;
+    }
     if (d.kind === 'amarquee') {
       if (!d.moved) {
         if (!d.shift) { state.sel.clear(); state.asel.clear(); render(); }
@@ -7612,6 +8183,7 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     renderLayers, markLayerRows, updateTransform, applyTransformField, setRef,
     doAddLayer, doDuplicateLayer, doDeleteLayer, doLock, doHide, doUnlockAll, doShowAll,
     setTarget, pushColor, pushOpacity, swapPaints, defaultPaints,
+    sampleAppearance, applySample,
     applyStroke, applySwatch, addCurrentSwatch, renameSwatchAt,
     penFinish, doDeleteAnchors,
     placeImage, addPlacedImage, selectedImage, bitmapOf, traceOpts,

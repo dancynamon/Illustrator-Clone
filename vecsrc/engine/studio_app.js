@@ -13,9 +13,13 @@
 
   const TOOLS = {
     select: 'Selection', direct: 'Direct Selection', pen: 'Pen',
-    rect: 'Rectangle', ellipse: 'Ellipse', hand: 'Hand', zoom: 'Zoom',
+    rect: 'Rectangle', ellipse: 'Ellipse', eyedrop: 'Eyedropper',
+    hand: 'Hand', zoom: 'Zoom',
   };
-  const TOOL_KEYS = { v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', h: 'hand', z: 'zoom' };
+  const TOOL_KEYS = {
+    v: 'select', a: 'direct', p: 'pen', m: 'rect', l: 'ellipse', i: 'eyedrop',
+    h: 'hand', z: 'zoom',
+  };
 
   const AUTOSAVE_KEY = 'aqvec_autosave';
 
@@ -48,6 +52,7 @@
     paint: null,         // {fill, stroke} current paints — null means "none"
     pick: null,          // {fill, stroke} last real color per target, for the picker
     colorModel: 'rgb',   // picker entry mode: rgb | cmyk | hsb
+    hsb: [0, 0, 1],      // the picker's own hue/sat/bright (see rememberHsb)
     swatchSel: -1,       // selected swatch index in doc.swatches
     trace: {             // Image Trace panel controls + last preview result
       preset: 'color6', colors: 6, threshold: 128, tolerance: 1,
@@ -405,12 +410,27 @@
     appendPath(cmds);
   }
 
-  // Canvas only centers strokes, so inside/outside draw at double weight and
-  // clip to (or away from) the shape — the same construction the PDF exporter
-  // writes, so preview and print agree. Caps and joins render at that doubled
-  // size, which only shows on open or dashed paths; closed shapes, where
-  // alignment actually matters, are exact. The current path on entry is the
-  // shape's, left there by the fill pass.
+  // Offsetting is the costly part of an aligned stroke, so hold the last
+  // result per shape and redo it only when the geometry — or the stroke that
+  // shaped it — changes. Drags replace s.cmds outright, so identity is enough.
+  const offsetCache = new WeakMap();
+  function alignedPath(s) {
+    const st = s.stroke;
+    const key = C.strokeProp(st, 'align') + '|' + st.w + '|' +
+      C.strokeProp(st, 'join') + '|' + C.strokeProp(st, 'miter');
+    const hit = offsetCache.get(s);
+    if (hit && hit.key === key && hit.cmds === s.cmds) return hit.path;
+    const path = C.strokeOffsetPath(s.cmds, st);
+    offsetCache.set(s, { key, cmds: s.cmds, path });
+    return path;
+  }
+
+  // Canvas only centers strokes. An inside or outside stroke is a centered one
+  // riding the path offset half a weight to that side, which is what keeps
+  // caps, joins and dashes at their true size. The clip stays as a backstop:
+  // it is what stops the stroke leaking across the edge where the shape is
+  // thinner than the stroke, and it covers the case where the offset collapses
+  // altogether. The current path on entry is the shape's, left by the fill pass.
   // colorOverride carries the separation-preview ink color when one is active.
   function strokeShape(s, colorOverride) {
     const st = s.stroke;
@@ -423,7 +443,6 @@
     const align = C.strokeProp(st, 'align');
     if (align !== 'center') {
       ctx.save();
-      ctx.lineWidth = st.w * 2;
       if (align === 'inside') {
         ctx.clip();
       } else {
@@ -434,7 +453,9 @@
         appendPath(s.cmds); // even-odd against the enclosing rect = outside only
         ctx.clip('evenodd');
       }
-      drawPath(s.cmds);
+      const off = alignedPath(s);
+      if (off) drawPath(off);
+      else { ctx.lineWidth = st.w * 2; drawPath(s.cmds); } // offset ate the shape
       ctx.stroke();
       ctx.restore();
     } else {
@@ -1022,11 +1043,30 @@
           : C.rgbToCmyk(rgb);
       return v.map(x => x * 100);
     }
-    if (model === 'hsb') {
-      const h = C.rgbToHsb(rgb);
-      return [h[0], h[1] * 100, h[2] * 100];
-    }
+    // HSB reads the picker's remembered triple, not a fresh conversion, so the
+    // fields agree with the square and hue strip on colors where hue is
+    // undefined. syncPaintPanel refreshes it from the color first.
+    if (model === 'hsb') return [state.hsb[0], state.hsb[1] * 100, state.hsb[2] * 100];
     return rgb.map(x => x * 255);
+  }
+
+  // Black has no hue and no saturation, white has no hue: converting straight
+  // out of RGB would snap the square's marker to a corner and lose where the
+  // user was. Carry the undefined components over instead.
+  function rememberHsb(col) {
+    const [h, s, v] = C.rgbToHsb(col ? col.rgb : [0, 0, 0]);
+    const prev = state.hsb;
+    state.hsb = [s > 1e-6 && v > 1e-6 ? h : prev[0], v > 1e-6 ? s : prev[1], v];
+    return state.hsb;
+  }
+
+  // What the square and hue strip paint with. In CMYK entry mode the pick is
+  // converted on the way out so print work stays in CMYK.
+  function pickedColor(hsb) {
+    const rgb = C.hsbToRgb(hsb);
+    return state.colorModel === 'cmyk'
+      ? C.makeColor({ space: 'cmyk', values: C.rgbToCmyk(rgb) })
+      : C.makeColor({ space: 'rgb', values: rgb });
   }
 
   function modelToColor(vals, model) {
@@ -1097,6 +1137,85 @@
   // drag or mid keystroke fights them for the caret.
   function setVal(el, v) { if (el !== document.activeElement) el.value = v; }
 
+  // ---------- hue / saturation picker ----------
+  const sbCanvas = $('#col-sb'), hueCanvas = $('#col-hue');
+  let pickerHue = null;
+
+  function sizeCanvas(cv) {
+    const r = cv.getBoundingClientRect();
+    const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+    if (cv.width === w && cv.height === h) return false;
+    cv.width = w; cv.height = h;
+    return true;
+  }
+
+  // The square is white -> full hue across, transparent -> black down: two
+  // gradients rather than a per-pixel fill, which is why it can repaint on a
+  // drag without costing anything.
+  function paintSquare(h) {
+    const g = sbCanvas.getContext('2d');
+    const w = sbCanvas.width, ht = sbCanvas.height;
+    let grad = g.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(1, C.rgbToHex(C.hsbToRgb([h, 1, 1])));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+    grad = g.createLinearGradient(0, 0, 0, ht);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, '#000000');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+  }
+
+  function paintHueStrip() {
+    const g = hueCanvas.getContext('2d');
+    const w = hueCanvas.width, ht = hueCanvas.height;
+    const grad = g.createLinearGradient(0, 0, 0, ht);
+    for (let i = 0; i <= 6; i++) grad.addColorStop(i / 6, C.rgbToHex(C.hsbToRgb([i * 60, 1, 1])));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+  }
+
+  function drawPicker() {
+    const [h, s, v] = state.hsb;
+    const grew = sizeCanvas(sbCanvas);
+    if (sizeCanvas(hueCanvas) || grew) paintHueStrip();
+    if (grew || pickerHue !== h) { pickerHue = h; paintSquare(h); }
+    const dot = $('#col-sb-dot').style;
+    dot.left = (s * 100) + '%';
+    dot.top = ((1 - v) * 100) + '%';
+    $('#col-hue-bar').style.top = (h / 360 * 100) + '%';
+  }
+
+  // Drag anywhere in a picker surface: live while the pointer is down, one
+  // history entry when it comes up, same as the component sliders.
+  function pickerDrag(el, fn) {
+    let down = false;
+    const at = e => {
+      const r = el.getBoundingClientRect();
+      const x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      const y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      state.hsb = fn(x, y);
+      pushColor(pickedColor(state.hsb), true);
+    };
+    el.addEventListener('pointerdown', e => {
+      down = true;
+      blurPanelField();
+      el.setPointerCapture(e.pointerId);
+      at(e);
+      e.preventDefault();
+    });
+    el.addEventListener('pointermove', e => { if (down) at(e); });
+    el.addEventListener('pointerup', e => {
+      if (!down) return;
+      down = false;
+      el.releasePointerCapture(e.pointerId);
+      if (C.commit(state.history, state.doc)) scheduleAutosave();
+    });
+  }
+  pickerDrag(sbCanvas, (x, y) => [state.hsb[0], x, 1 - y]);
+  pickerDrag(hueCanvas, (x, y) => [y * 360, state.hsb[1], state.hsb[2]]);
+
   const colSliders = $('#col-sliders');
   let sliderModel = null;
 
@@ -1116,6 +1235,9 @@
       const push = (v, live) => {
         const vals = COLOR_MODELS[sliderModel].map((c, j) => +colSliders.children[j].children[1].value);
         vals[i] = v;
+        // HSB typed here is authoritative — take it before the color round
+        // trips, or a hue set on a gray would have nowhere to survive.
+        if (sliderModel === 'hsb') state.hsb = [vals[0], vals[1] / 100, vals[2] / 100];
         pushColor(modelToColor(vals, sliderModel), live);
       };
       range.addEventListener('input', () => push(+range.value, true));
@@ -1142,6 +1264,8 @@
         col ? C.colorHex(col) : (kind === 'fill' ? '#ffffff' : '#ffffff');
     }
     const col = state.pick[state.target];
+    rememberHsb(col);
+    drawPicker();
     setVal($('#col-hex'), C.colorHex(col));
     setVal($('#col-model'), state.colorModel);
     colorToModel(col, state.colorModel).forEach((v, i) => {
@@ -1185,6 +1309,66 @@
     if (C.commit(state.history, state.doc)) scheduleAutosave();
   });
   $('#op-num').addEventListener('change', e => pushOpacity(+e.target.value, false));
+
+  // ---------- eyedropper ----------
+  // Sampling reads an object's own attributes rather than the pixel it
+  // painted, which is the whole point on a print document: a spot ink comes
+  // back as the ink, and a CMYK build as the build. Only empty artboard falls
+  // back to a flat colour.
+  function sampleHitAt(wx, wy) {
+    // Unlike selection this looks through locked layers — sampling only reads,
+    // so if you can see a colour you can pick it.
+    const visible = new Set(state.doc.layers.filter(l => l.visible).map(l => l.id));
+    const tol = 3 / state.view.scale;
+    for (let i = state.doc.shapes.length - 1; i >= 0; i--) {
+      const s = state.doc.shapes[i];
+      if (!visible.has(s.layer)) continue;
+      if (C.hitTestShape(s, wx, wy, tol)) return s;
+    }
+    return null;
+  }
+
+  // Bare artboard is the white it is painted with; off the artboard there is
+  // no artwork to sample and the tool does nothing.
+  function sampleAppearance(wx, wy) {
+    const hit = sampleHitAt(wx, wy);
+    if (hit) return C.shapeAppearance(hit);
+    const ab = state.doc.artboard;
+    if (wx < 0 || wy < 0 || wx > ab.w || wy > ab.h) return null;
+    return {
+      fill: C.makeColor({ space: 'cmyk', values: [0, 0, 0, 0] }),
+      stroke: null, strokeAttrs: null, opacity: 1,
+    };
+  }
+
+  // Plain click takes the whole appearance the way Illustrator's does; shift
+  // takes only the colour, into whichever well is targeted. live=true is the
+  // drag, which keeps sampling as it passes over objects and lands as a single
+  // history entry when the pointer comes up.
+  function applySample(ap, colorOnly, live) {
+    if (!ap) return;
+    if (colorOnly) {
+      pushColor(ap.fill || ap.stroke, live);
+      return;
+    }
+    state.paint = { fill: ap.fill, stroke: ap.stroke };
+    if (ap.fill) state.pick.fill = ap.fill;
+    if (ap.stroke) state.pick.stroke = ap.stroke;
+    if (state.sel.size) {
+      C.applyAppearance(state.doc, [...state.sel], ap);
+      if (!live && C.commit(state.history, state.doc)) scheduleAutosave();
+    }
+    render();
+  }
+
+  function showSample(wx, wy) {
+    const ap = sampleAppearance(wx, wy);
+    const col = ap && (ap.fill || ap.stroke);
+    $('#s-sample i').style.background = col ? C.colorHex(col) : 'transparent';
+    $('#s-sample b').textContent = col
+      ? (col.space === 'separation' ? col.name + ' · spot' : C.defaultSwatchName(col))
+      : (ap ? 'None' : '—');
+  }
 
   // ---------- stroke options ----------
   function selStroke() {
@@ -1859,6 +2043,8 @@
     document.querySelectorAll('#toolbar button[data-tool]').forEach(b =>
       b.classList.toggle('active', b.dataset.tool === t));
     stagewrap.className = 'tool-' + t;
+    $('#statusbar').classList.toggle('sampling', t === 'eyedrop');
+    if (t !== 'eyedrop') $('#s-sample b').textContent = '—';
     updateReadouts();
   }
 
@@ -2175,6 +2361,15 @@
       render();
       return;
     }
+    if (state.tool === 'eyedrop') {
+      if (e.button === 0) {
+        canvas.setPointerCapture(e.pointerId);
+        state.drag = { kind: 'sample', shift: e.shiftKey };
+        const [wx, wy] = worldPt(e);
+        applySample(sampleAppearance(wx, wy), e.shiftKey, true);
+      }
+      return;
+    }
     if (e.button !== 0) return;
     if (state.tool === 'rect' || state.tool === 'ellipse') { onShapeToolDown(e); return; }
     if (state.tool === 'pen') { onPenDown(e); return; }
@@ -2288,10 +2483,15 @@
         d.m1 = [sx, sy];
         d.moved = true;
         render();
+      } else if (d.kind === 'sample') {
+        applySample(sampleAppearance(wx, wy), d.shift, true);
+        showSample(wx, wy);
       }
     } else if (state.tool === 'select' && !state.pan) {
       const hh = hitHandle(sx, sy);
       canvas.style.cursor = hh ? (hh.type === 'rotate' ? 'crosshair' : HANDLE_CURSOR[hh.c]) : '';
+    } else if (state.tool === 'eyedrop') {
+      showSample(wx, wy);
     }
     const k = C.PT_PER[state.doc.units];
     $('#s-coords').textContent = `x: ${(wx / k).toFixed(2)} ${state.doc.units}   y: ${(wy / k).toFixed(2)} ${state.doc.units}`;
@@ -2309,6 +2509,11 @@
     const d = state.drag;
     if (!d) return;
     state.drag = null;
+    if (d.kind === 'sample') {
+      commitNow(); // the whole sampling drag is one step
+      render();
+      return;
+    }
     if (d.kind === 'amarquee') {
       if (!d.moved) {
         if (!d.shift) { state.sel.clear(); state.asel.clear(); render(); }
@@ -2460,6 +2665,7 @@
     renderLayers, markLayerRows, updateTransform, applyTransformField, setRef,
     doAddLayer, doDuplicateLayer, doDeleteLayer, doLock, doHide, doUnlockAll, doShowAll,
     setTarget, pushColor, pushOpacity, swapPaints, defaultPaints,
+    sampleAppearance, applySample,
     applyStroke, applySwatch, addCurrentSwatch, renameSwatchAt,
     penFinish, doDeleteAnchors,
     placeImage, addPlacedImage, selectedImage, bitmapOf, traceOpts,
