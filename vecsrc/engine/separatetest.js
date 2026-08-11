@@ -389,6 +389,16 @@ function plateOf(plates, key) { return plates.find(p => p.ink.key === key) || nu
     ok(S.preflight(doc, { minStroke: 0.05 }).every(i => i.code !== 'hairline'),
       'preflight: the hairline threshold is tunable');
     ok(S.preflight(processOnlyDoc()).length === 0, 'preflight: a clean process job passes');
+
+    // a substrate is legitimate, but it floods the flat export — say so
+    const onFoam = processOnlyDoc();
+    ok(S.preflight(onFoam).every(i => i.code !== 'substrate'),
+      'preflight: white paper raises nothing');
+    S.setSubstrate(onFoam, '#1f4e79');
+    const sub = S.preflight(onFoam).find(i => i.code === 'substrate');
+    ok(sub && sub.level === 'warn' && /#1f4e79/.test(sub.message),
+      'preflight: flags a substrate and names it');
+    ok(sub.scope === 'flat', 'preflight: ...scoped to the flat export, so plate export ignores it');
     ok(S.preflight(C.newDoc()).some(i => i.code === 'empty'), 'preflight: an empty artboard is an error');
   }
 

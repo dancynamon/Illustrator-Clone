@@ -607,7 +607,9 @@
   // One PDF per ink, downloaded back to back. Preflight warnings are shown
   // first so nobody plates a job with RGB or hairlines still in it.
   function exportPlates() {
-    const issues = doPreflight();
+    // The panel shows every preflight issue; the plate prompt only raises the
+    // ones plates can actually be hurt by.
+    const issues = doPreflight().filter(i => i.scope !== 'flat');
     const blocking = issues.filter(i => i.level === 'error');
     if (blocking.length) { window.alert('Cannot plate:\n\n' + blocking.map(i => '· ' + i.message).join('\n')); return; }
     if (issues.length && !window.confirm('Preflight found:\n\n' +

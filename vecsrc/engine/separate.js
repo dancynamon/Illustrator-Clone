@@ -424,6 +424,8 @@ const SEPARATE = (() => {
 
   // ---------- preflight ----------
   // Everything that bites on press, checked before plates go out the door.
+  // An issue carries scope:'flat' when it only concerns the flat artboard
+  // PDF and has no bearing on plates, so plate export can skip it.
   function preflight(doc, opts = {}) {
     const minStroke = opts.minStroke != null ? opts.minStroke : HAIRLINE_PT;
     const issues = [];
@@ -431,6 +433,17 @@ const SEPARATE = (() => {
 
     if (!shapes.length) {
       issues.push({ level: 'error', code: 'empty', message: 'Nothing to print: no visible artwork.', ids: [] });
+    }
+
+    const substrate = substrateOf(doc);
+    if (substrate) {
+      issues.push({
+        level: 'warn', code: 'substrate', scope: 'flat',
+        message: 'Substrate ' + substrate + ' is set, so a flat PDF export lays it down ' +
+          'as a full-bleed flood. Fine for a proof; switch to Paper before sending ' +
+          'artwork to a printer. Plates are unaffected.',
+        ids: [],
+      });
     }
 
     const rgbIds = [];
