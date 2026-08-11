@@ -166,11 +166,13 @@ const PDFIO = (() => {
     return out;
   }
 
-  // Flat vector PDF of the whole artboard. Returns a Uint8Array.
+  // Flat vector PDF of the whole artboard, on its substrate if the piece has
+  // one — the file should look like the thing being made. Returns a Uint8Array.
   function exportDocPDF(doc) {
     return P.exportPDF({
       width: doc.artboard.w,
       height: doc.artboard.h,
+      substrate: S.substrateColor(doc),
       shapes: exportShapes(doc),
       title: doc.name || 'Untitled',
     });

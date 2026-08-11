@@ -27,6 +27,7 @@
  *     fillRule: 'nonzero' | 'evenodd',
  *     overprint: true | false | undefined
  *   } ],
+ *   substrate?: color,      // material the piece prints on, painted first
  *   title?, creator?        // Info dictionary strings
  * }
  *
@@ -183,6 +184,12 @@ function buildContent(doc, res) {
   // written exactly as stored. All geometry goes inside this one q/Q.
   lines.push('q');
   lines.push('1 0 0 -1 0 ' + fmt(doc.height) + ' cm');
+  // Colored stock goes down first, so artwork reads against the material it
+  // prints on rather than against the page. White paper adds nothing.
+  if (doc.substrate) {
+    lines.push('q', colorOps(doc.substrate, false, res),
+      '0 0 ' + fmt(doc.width) + ' ' + fmt(doc.height) + ' re', 'f', 'Q');
+  }
   for (const shape of doc.shapes || []) {
     if (!shape || !shape.subpaths || !shape.subpaths.length) continue;
     if (!shape.fill && !shape.stroke) continue;

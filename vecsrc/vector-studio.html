@@ -2403,6 +2403,7 @@ if (typeof module !== 'undefined' && module.exports) {
  *     fillRule: 'nonzero' | 'evenodd',
  *     overprint: true | false | undefined
  *   } ],
+ *   substrate?: color,      // material the piece prints on, painted first
  *   title?, creator?        // Info dictionary strings
  * }
  *
@@ -2559,6 +2560,12 @@ function buildContent(doc, res) {
   // written exactly as stored. All geometry goes inside this one q/Q.
   lines.push('q');
   lines.push('1 0 0 -1 0 ' + fmt(doc.height) + ' cm');
+  // Colored stock goes down first, so artwork reads against the material it
+  // prints on rather than against the page. White paper adds nothing.
+  if (doc.substrate) {
+    lines.push('q', colorOps(doc.substrate, false, res),
+      '0 0 ' + fmt(doc.width) + ' ' + fmt(doc.height) + ' re', 'f', 'Q');
+  }
   for (const shape of doc.shapes || []) {
     if (!shape || !shape.subpaths || !shape.subpaths.length) continue;
     if (!shape.fill && !shape.stroke) continue;
@@ -3014,11 +3021,13 @@ const PDFIO = (() => {
     return out;
   }
 
-  // Flat vector PDF of the whole artboard. Returns a Uint8Array.
+  // Flat vector PDF of the whole artboard, on its substrate if the piece has
+  // one — the file should look like the thing being made. Returns a Uint8Array.
   function exportDocPDF(doc) {
     return P.exportPDF({
       width: doc.artboard.w,
       height: doc.artboard.h,
+      substrate: S.substrateColor(doc),
       shapes: exportShapes(doc),
       title: doc.name || 'Untitled',
     });
