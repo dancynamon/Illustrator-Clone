@@ -4640,9 +4640,8 @@ const VECTRACE = (() => {
     minArea: 4,          // noise: regions smaller than this get merged away
     ignoreWhite: false,
     curves: true,        // false -> polygonal output (crisp pixel art)
-    spread: 0.3,         // px of outward trap so neighbours overlap, not gap
     alphaCut: 128,       // pixels below this alpha are not traced
-    maxPaths: 12000,    // runaway guard only — Noise is the real path-count knob
+    maxPaths: 12000,     // runaway guard only — Noise is the real path-count knob
   };
 
   // Illustrator-familiar presets. The pixel-art pair keeps tolerance at 0 and
@@ -4654,8 +4653,8 @@ const VECTRACE = (() => {
     color6: { label: '6 Colors', mode: 'color', colors: 6, tolerance: 1, cornerAngle: 60, minArea: 5 },
     color16: { label: '16 Colors', mode: 'color', colors: 16, tolerance: 1, cornerAngle: 60, minArea: 4 },
     photo: { label: 'Photo', mode: 'color', colors: 24, tolerance: 1.5, cornerAngle: 75, minArea: 8 },
-    pixel: { label: 'Pixel Art', mode: 'exact', colors: 64, tolerance: 0, cornerAngle: 15, minArea: 1, curves: false, spread: 0 },
-    pixelbw: { label: 'Pixel Art B&W', mode: 'bw', threshold: 128, tolerance: 0, cornerAngle: 15, minArea: 1, curves: false, ignoreWhite: true, spread: 0 },
+    pixel: { label: 'Pixel Art', mode: 'exact', colors: 64, tolerance: 0, cornerAngle: 15, minArea: 1, curves: false },
+    pixelbw: { label: 'Pixel Art B&W', mode: 'bw', threshold: 128, tolerance: 0, cornerAngle: 15, minArea: 1, curves: false, ignoreWhite: true },
   };
   const PRESET_ORDER = ['bw', 'gray', 'color3', 'color6', 'color16', 'photo', 'pixel', 'pixelbw'];
 
@@ -4678,7 +4677,6 @@ const VECTRACE = (() => {
     t.tolerance = clampNum(t.tolerance, 0, 100, 1);
     t.cornerAngle = clampNum(t.cornerAngle, 0, 180, 60);
     t.minArea = Math.round(clampNum(t.minArea, 0, 1e6, 4));
-    t.spread = clampNum(t.spread, 0, 8, 0.3);
     t.alphaCut = Math.round(clampNum(t.alphaCut, 0, 255, 128));
     t.maxPaths = Math.round(clampNum(t.maxPaths, 1, 1e6, 12000));
     t.ignoreWhite = !!t.ignoreWhite;
@@ -4940,12 +4938,24 @@ const VECTRACE = (() => {
     return a / 2;
   }
 
-  // Junctions: grid vertices where three or more regions meet (the image border
-  // counts as one). Neighbouring regions trace the same crack in opposite
-  // directions, so pinning both of them to these vertices — and only these —
-  // makes the shared run simplify and fit to identical geometry on both sides.
-  // Without that, every boundary is approximated twice and the two answers
-  // disagree by a fraction of a pixel: hairline gaps all over a photo trace.
+  // Vertices the simplifier is not allowed to give away. Neighbouring regions
+  // trace the same crack in opposite directions, so pinning both of them to
+  // these vertices — and only these — makes the shared run simplify and fit to
+  // identical geometry on both sides. Without that, every boundary is
+  // approximated twice, the two answers disagree by a fraction of a pixel, and
+  // artboard shows through in the difference. Two reasons to pin, two bits:
+  //   PIN_JUNCTION — three or more regions meet here, so several loops pass
+  //     through this point and all of them have to keep it to stay in step.
+  //   PIN_EDGE — the vertex is on the image border. That border is an
+  //     artificial cut, not an edge of the artwork: nothing is traced beyond
+  //     it to take up what this boundary gives away, so a corner shaved off
+  //     there is artboard showing at the edge of the art for good. It is also
+  //     free to pin, since a border run is straight and collapses to its two
+  //     ends anyway. A transparent boundary is deliberately NOT pinned — that
+  //     is a real outline of the artwork and gets smoothed like any other,
+  //     which is what the tolerance control is for.
+  const PIN_JUNCTION = 1, PIN_EDGE = 2;
+
   function junctionMap(labels, w, h) {
     const stride = w + 1;
     const j = new Uint8Array(stride * (h + 1));
@@ -4957,8 +4967,11 @@ const VECTRACE = (() => {
         if (tr !== tl) n++;
         if (bl !== tl && bl !== tr) n++;
         if (br !== tl && br !== tr && br !== bl) n++;
+        let f = 0;
         // a checkerboard vertex is a junction too, even with only two labels
-        if (n >= 3 || (tl === br && tr === bl && tl !== tr)) j[x + y * stride] = 1;
+        if (n >= 3 || (tl === br && tr === bl && tl !== tr)) f |= PIN_JUNCTION;
+        if (x === 0 || y === 0 || x === w || y === h) f |= PIN_EDGE;
+        j[x + y * stride] = f;
       }
     }
     return j;
@@ -5005,8 +5018,10 @@ const VECTRACE = (() => {
         for (;;) {
           const m = edges.get(v) & ~(1 << dir);
           if (m) edges.set(v, m); else edges.delete(v);
-          const pin = junction ? junction[v] : 0;
-          if (dir !== last || pin) { pts.push([v % stride, (v / stride) | 0]); fix.push(pin); }
+          const corner = dir !== last;
+          const f = junction ? junction[v] : 0;
+          const pin = ((f & PIN_JUNCTION) || (corner && (f & PIN_EDGE))) ? 1 : 0;
+          if (corner || pin) { pts.push([v % stride, (v / stride) | 0]); fix.push(pin); }
           last = dir;
           v += DX[dir] + DY[dir] * stride;
           if (v === s0) break;
@@ -5027,36 +5042,6 @@ const VECTRACE = (() => {
       }
     }
     return loops;
-  }
-
-  // Push a loop outwards along its vertex bisectors (outers grow, holes
-  // shrink). Simplification and curve fitting each move a boundary by a
-  // fraction of a pixel, and where two of those errors happen to pull the same
-  // way a hairline of artboard shows between neighbours. A sub-pixel spread
-  // makes regions overlap instead — the classic print trap. Largest-area-first
-  // z-order hides the overlap; the gap it replaces would not have been hidden.
-  function spreadLoop(pts, d) {
-    const n = pts.length;
-    if (!d || n < 3) return pts;
-    // Every loop is walked with its material on the right, so (dy,-dx) always
-    // points away from the material — outer loops grow, holes shrink.
-    const nx = new Array(n), ny = new Array(n);
-    for (let i = 0; i < n; i++) {
-      const a = pts[i], b = pts[(i + 1) % n];
-      const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
-      nx[i] = dy / L; ny[i] = -dx / L;
-    }
-    const out = new Array(n);
-    for (let i = 0; i < n; i++) {
-      const p = (i + n - 1) % n;
-      let bx = nx[p] + nx[i], by = ny[p] + ny[i];
-      const L = Math.hypot(bx, by);
-      if (L < 1e-9) { out[i] = [pts[i][0] + nx[i] * d, pts[i][1] + ny[i] * d]; continue; }
-      bx /= L; by /= L;
-      const m = d / Math.max(0.4, bx * nx[i] + by * ny[i]); // miter, capped at 2.5x
-      out[i] = [pts[i][0] + bx * m, pts[i][1] + by * m];
-    }
-    return out;
   }
 
   function pointInPoly(pts, x, y) {
@@ -5090,6 +5075,18 @@ const VECTRACE = (() => {
   }
 
   // ---------- stage 5: simplification (Ramer-Douglas-Peucker) ----------
+  // Ordering that depends only on where a point *is*, never on which way the
+  // run is being walked. Both sides of a shared boundary see the same points
+  // in opposite order, so every "pick the extreme point" decision in this file
+  // breaks near-ties with this — otherwise the two sides split the run in
+  // different places and their simplifications drift apart by a fraction of a
+  // pixel. On a pixel grid those ties are the common case, not a corner case.
+  function lexLess(a, b) { return a[1] !== b[1] ? a[1] < b[1] : a[0] < b[0]; }
+
+  // Distances either side computes for the same point differ in the last bits
+  // (different chord origin, negated deltas), so ties need slack to register.
+  function tieSlack(v) { return 1e-9 * (1 + Math.abs(v)); }
+
   function rdpOpen(pts, tol) {
     const n = pts.length;
     if (n < 3) return pts.slice();
@@ -5105,13 +5102,19 @@ const VECTRACE = (() => {
       let best = -1, bd = -1;
       for (let i = a + 1; i < b; i++) {
         const ux = pts[i][0] - ax, uy = pts[i][1] - ay;
+        // cross²/L² rather than reconstructing the foot of the perpendicular:
+        // on integer grid points the cross product is exact, so a collinear
+        // point measures exactly 0 (it must drop at tolerance 0) and the two
+        // walk directions get bit-identical distances instead of answers that
+        // differ in the last few bits.
+        const dot = ux * dx + uy * dy;
         let d2;
-        if (L2 > 0) {
-          const t = Math.max(0, Math.min(1, (ux * dx + uy * dy) / L2));
-          const ex = ux - t * dx, ey = uy - t * dy;
-          d2 = ex * ex + ey * ey;
-        } else d2 = ux * ux + uy * uy;
-        if (d2 > bd) { bd = d2; best = i; }
+        if (L2 <= 0 || dot <= 0) d2 = ux * ux + uy * uy;
+        else if (dot >= L2) { const vx = ux - dx, vy = uy - dy; d2 = vx * vx + vy * vy; }
+        else { const cr = ux * dy - uy * dx; d2 = cr * cr / L2; }
+        const slack = tieSlack(bd);
+        if (d2 > bd + slack) { bd = d2; best = i; }
+        else if (d2 > bd - slack && lexLess(pts[i], pts[best])) { best = i; if (d2 > bd) bd = d2; }
       }
       if (bd > t2) { keep[best] = 1; stack.push(a, best, best, b); }
     }
@@ -5120,56 +5123,46 @@ const VECTRACE = (() => {
     return out;
   }
 
-  // Anchors chosen from the point set alone (never from the walk's start
-  // vertex), so a loop and its reversed twin land on the same two anchors.
-  function lexLess(a, b) { return a[1] !== b[1] ? a[1] < b[1] : a[0] < b[0]; }
-
+  // An anchor chosen from the point set alone, never from wherever the contour
+  // walk happened to start, so a loop and its reversed twin agree on it.
   function canonicalStart(pts) {
     let k = 0;
     for (let i = 1; i < pts.length; i++) if (lexLess(pts[i], pts[k])) k = i;
     return k;
   }
 
-  function farthestFrom(pts, i0) {
-    let best = i0 === 0 ? 1 % pts.length : 0, bd = -1;
-    for (let i = 0; i < pts.length; i++) {
-      if (i === i0) continue;
-      const dx = pts[i][0] - pts[i0][0], dy = pts[i][1] - pts[i0][1];
-      const d = dx * dx + dy * dy;
-      if (d > bd || (d === bd && lexLess(pts[i], pts[best]))) { bd = d; best = i; }
-    }
-    return best;
-  }
-
   // Closed loops are cut into spans at their anchors and each span goes through
   // RDP on its own, so the endpoints are never up for negotiation.
   function simplifyLoop(pts, fix, tol) {
     const n = pts.length;
-    if (n < 4) return { pts: pts.slice(), fix: fix ? Array.from(fix) : new Array(n).fill(0) };
-    const anchors = [], pinned = [];
+    if (n < 3) return { pts: pts.slice(), fix: fix ? Array.from(fix) : new Array(n).fill(0) };
+    const anchors = [];
     if (fix) for (let i = 0; i < n; i++) if (fix[i]) anchors.push(i);
-    for (const a of anchors) pinned.push(1);
-    if (anchors.length === 0) {
-      const a0 = canonicalStart(pts);
-      anchors.push(a0, farthestFrom(pts, a0));
-      pinned.push(0, 0);
-    } else if (anchors.length === 1) {
-      anchors.push(farthestFrom(pts, anchors[0]));
-      pinned.push(0);
-    }
-    const ord = anchors.map((v, i) => i).sort((i, j) => anchors[i] - anchors[j]);
+    // Anchors may only be things the neighbour sharing this boundary also
+    // knows about. Junctions qualify; a second anchor invented from this
+    // loop's own shape does not — it would cut the shared run somewhere the
+    // other side does not, and the two simplifications drift apart there. With
+    // a single junction the span simply wraps the whole loop back to it, and
+    // with none the anchor comes from the point set (identical on both sides).
+    const pinned = anchors.length > 0;
+    if (!pinned) anchors.push(canonicalStart(pts));
     const outPts = [], outFix = [];
-    for (let k = 0; k < ord.length; k++) {
-      const a = anchors[ord[k]], b = anchors[ord[(k + 1) % ord.length]];
-      const run = [];
-      for (let i = a; ; i = (i + 1) % n) { run.push(pts[i]); if (i === b) break; }
+    for (let k = 0; k < anchors.length; k++) {
+      const a = anchors[k], b = anchors[(k + 1) % anchors.length];
+      const run = [pts[a]];
+      for (let i = (a + 1) % n; ; i = (i + 1) % n) { run.push(pts[i]); if (i === b) break; }
       const r = rdpOpen(run, tol);
       for (let i = 0; i < r.length - 1; i++) {
         outPts.push(r[i]);
-        outFix.push(i === 0 ? pinned[ord[k]] : 0);
+        outFix.push(i === 0 && pinned ? 1 : 0);
       }
     }
-    if (outPts.length < 3) return { pts: pts.slice(), fix: fix ? Array.from(fix) : new Array(n).fill(0) };
+    // A loop that simplifies below three points has been flattened to a line
+    // and gets dropped downstream. Do NOT fall back to the raw points here:
+    // this is a whole-loop decision, and the neighbour sharing these arcs makes
+    // it separately. When only one of them backs out, the two descriptions of
+    // the same boundary stop matching and the gap reopens. A zero-area loop
+    // costs nothing — the arcs its neighbours kept still tile the plane.
     return { pts: outPts, fix: outFix };
   }
 
@@ -5240,12 +5233,15 @@ const VECTRACE = (() => {
   }
 
   function maxError(pts, u, bz) {
-    let max = 0, at = (pts.length / 2) | 0;
+    let max = -1, at = -1;
     for (let i = 1; i < pts.length - 1; i++) {
       const q = bezierAt(bz, u[i]);
       const d = (q[0] - pts[i][0]) ** 2 + (q[1] - pts[i][1]) ** 2;
-      if (d > max) { max = d; at = i; }
+      const slack = tieSlack(max);
+      if (d > max + slack) { max = d; at = i; }
+      else if (d > max - slack && lexLess(pts[i], pts[at])) { at = i; if (d > max) max = d; }
     }
+    if (at < 0) return [0, (pts.length / 2) | 0]; // nothing between the ends
     return [Math.sqrt(max), at];
   }
 
@@ -5324,9 +5320,15 @@ const VECTRACE = (() => {
     if (fix) for (let i = 0; i < n; i++) if (fix[i]) cset.add(i);
     const corners = [...cset].sort((a, b) => a - b);
     const runs = [];
+    // A loop with no corner at all is one smooth run whose ends must meet
+    // tangent-continuously. Every other run ends on a corner, so its tangents
+    // are free — including a run that happens to start and end at the same
+    // vertex, which is what a pinched region's lobe looks like. Deciding that
+    // by identity rather than by corner-ness made a lobe fit differently from
+    // the neighbour tracing the same arc as a whole loop.
+    const smoothSeam = corners.length === 0;
     if (corners.length < 2) {
-      // fully smooth loop: one run from a canonical anchor back to itself
-      const s = corners.length ? corners[0] : canonicalStart(pts);
+      const s = smoothSeam ? canonicalStart(pts) : corners[0];
       const run = [];
       for (let i = 0; i <= n; i++) run.push(pts[(s + i) % n]);
       runs.push(run);
@@ -5344,10 +5346,9 @@ const VECTRACE = (() => {
     const segs = [];
     for (const run of runs) {
       const m = run.length;
-      const closedRun = run[0] === run[m - 1];
       let t1 = norm(run[1][0] - run[0][0], run[1][1] - run[0][1]);
       let t2 = norm(run[m - 2][0] - run[m - 1][0], run[m - 2][1] - run[m - 1][1]);
-      if (closedRun && m > 3) { // keep tangent continuity across the seam
+      if (smoothSeam && m > 3) { // keep tangent continuity across the seam
         t1 = norm(run[1][0] - run[m - 2][0], run[1][1] - run[m - 2][1]);
         t2 = [-t1[0], -t1[1]];
       }
@@ -5359,6 +5360,10 @@ const VECTRACE = (() => {
       if (isStraight(bz)) cmds.push(['L', bz[3][0], bz[3][1]]);
       else cmds.push(['C', bz[1][0], bz[1][1], bz[2][0], bz[2][1], bz[3][0], bz[3][1]]);
     }
+    // the last run lands back on the start anchor; Z already draws that edge
+    const tail = cmds[cmds.length - 1];
+    if (cmds.length >= 4 && tail[0] === 'L'
+      && Math.abs(tail[1] - cmds[0][1]) < 1e-9 && Math.abs(tail[2] - cmds[0][2]) < 1e-9) cmds.pop();
     cmds.push(['Z']);
     return cmds;
   }
@@ -5394,14 +5399,16 @@ const VECTRACE = (() => {
       if (!loops.length) continue;
       // Holes keep the winding the crack walk gave them — opposite the outer
       // loop — so nonzero fill hollows them out with no even-odd flag needed.
+      //
+      // Nest first, on the raw pixel loops, where containment is exact. A
+      // heavily simplified outer can pull inside its own hole, and a hole that
+      // then fails to find a parent gets subtracted from the wrong subpath —
+      // which reads as a bite taken out of the region.
+      const nested = nestLoops(loops);
       for (const lp of loops) {
         const s = simplifyLoop(lp.pts, lp.fix, o.tolerance);
         lp.pts = s.pts; lp.fix = s.fix;
       }
-      // nest on the true geometry, then trap: spreading first would move hole
-      // start points and could pick the wrong parent
-      const nested = nestLoops(loops);
-      for (const lp of loops) lp.pts = spreadLoop(lp.pts, o.spread);
       const cmds = [];
       for (const nest of nested) {
         const outer = fitPath(nest.outer.pts, o, nest.outer.fix);
@@ -5505,7 +5512,7 @@ const VECTRACE = (() => {
     luma, hexOf, isWhite,
     quantize, medianCut,
     labelRegions, regionPixels, denoise,
-    contours, junctionMap, polyArea, nestLoops, pointInPoly, dropCollinear, spreadLoop,
+    contours, junctionMap, polyArea, nestLoops, pointInPoly, dropCollinear,
     rdpOpen, simplifyClosed, simplifyLoop, canonicalStart,
     detectCorners, fitPath, isStraight,
     trace, placementMatrix, addSwatches, expandToShapes,
