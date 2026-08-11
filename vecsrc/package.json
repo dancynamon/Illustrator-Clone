@@ -5,6 +5,7 @@
   "description": "Aquamentor Vector Studio — Illustrator-style vector editor: trace pixel art, arrange for print, spot/color plates.",
   "scripts": {
     "build": "node engine/build.js",
-    "test": "node engine/vectest.js && node engine/pdfiotest.js && node engine/tracetest.js && node engine/separatetest.js"
+    "test": "node engine/vectest.js && node engine/pdfiotest.js && node engine/tracetest.js && node engine/separatetest.js",
+    "uitest": "node engine/uitest.js"
   }
 }
