@@ -160,6 +160,26 @@
   .fscol .pbtns { margin-top: 0; }
   #fs-ink { color: var(--text-dim); padding: 3px 0 0; min-height: 16px; }
 
+  /* color picker: saturation/brightness square beside a hue strip. The
+     markers are elements over the canvases rather than drawn into them, so a
+     repaint only costs a style write unless the hue itself moved. */
+  .picker { display: flex; gap: 6px; margin: 8px 0 6px; }
+  .picker .sq, .picker .strip {
+    position: relative; height: 124px; border: 1px solid #4a4a4a; background: #000;
+  }
+  .picker .sq { flex: 1; min-width: 0; }
+  .picker .strip { width: 14px; flex: none; }
+  .picker canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  #col-sb-dot {
+    position: absolute; width: 11px; height: 11px; margin: -6px 0 0 -6px; border-radius: 50%;
+    border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75), inset 0 0 0 1px rgba(0,0,0,.45);
+    pointer-events: none;
+  }
+  #col-hue-bar {
+    position: absolute; left: -3px; right: -3px; height: 3px; margin-top: -1.5px;
+    border: 1px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none;
+  }
+
   /* color picker rows */
   .crow { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
   .crow label { width: 12px; color: var(--text-dim); }
@@ -293,6 +313,14 @@
               <option value="hsb">HSB</option>
             </select>
           </div>
+        </div>
+      </div>
+      <div class="picker">
+        <div class="sq" title="Saturation and brightness">
+          <canvas id="col-sb"></canvas><i id="col-sb-dot"></i>
+        </div>
+        <div class="strip" title="Hue">
+          <canvas id="col-hue"></canvas><i id="col-hue-bar"></i>
         </div>
       </div>
       <div id="col-sliders"></div>
@@ -3102,6 +3130,7 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
     paint: null,         // {fill, stroke} current paints — null means "none"
     pick: null,          // {fill, stroke} last real color per target, for the picker
     colorModel: 'rgb',   // picker entry mode: rgb | cmyk | hsb
+    hsb: [0, 0, 1],      // the picker's own hue/sat/bright (see rememberHsb)
     swatchSel: -1,       // selected swatch index in doc.swatches
   };
   state.history = C.newHistory(state.doc);
@@ -3552,11 +3581,30 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
           : C.rgbToCmyk(rgb);
       return v.map(x => x * 100);
     }
-    if (model === 'hsb') {
-      const h = C.rgbToHsb(rgb);
-      return [h[0], h[1] * 100, h[2] * 100];
-    }
+    // HSB reads the picker's remembered triple, not a fresh conversion, so the
+    // fields agree with the square and hue strip on colors where hue is
+    // undefined. syncPaintPanel refreshes it from the color first.
+    if (model === 'hsb') return [state.hsb[0], state.hsb[1] * 100, state.hsb[2] * 100];
     return rgb.map(x => x * 255);
+  }
+
+  // Black has no hue and no saturation, white has no hue: converting straight
+  // out of RGB would snap the square's marker to a corner and lose where the
+  // user was. Carry the undefined components over instead.
+  function rememberHsb(col) {
+    const [h, s, v] = C.rgbToHsb(col ? col.rgb : [0, 0, 0]);
+    const prev = state.hsb;
+    state.hsb = [s > 1e-6 && v > 1e-6 ? h : prev[0], v > 1e-6 ? s : prev[1], v];
+    return state.hsb;
+  }
+
+  // What the square and hue strip paint with. In CMYK entry mode the pick is
+  // converted on the way out so print work stays in CMYK.
+  function pickedColor(hsb) {
+    const rgb = C.hsbToRgb(hsb);
+    return state.colorModel === 'cmyk'
+      ? C.makeColor({ space: 'cmyk', values: C.rgbToCmyk(rgb) })
+      : C.makeColor({ space: 'rgb', values: rgb });
   }
 
   function modelToColor(vals, model) {
@@ -3627,6 +3675,85 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
   // drag or mid keystroke fights them for the caret.
   function setVal(el, v) { if (el !== document.activeElement) el.value = v; }
 
+  // ---------- hue / saturation picker ----------
+  const sbCanvas = $('#col-sb'), hueCanvas = $('#col-hue');
+  let pickerHue = null;
+
+  function sizeCanvas(cv) {
+    const r = cv.getBoundingClientRect();
+    const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+    if (cv.width === w && cv.height === h) return false;
+    cv.width = w; cv.height = h;
+    return true;
+  }
+
+  // The square is white -> full hue across, transparent -> black down: two
+  // gradients rather than a per-pixel fill, which is why it can repaint on a
+  // drag without costing anything.
+  function paintSquare(h) {
+    const g = sbCanvas.getContext('2d');
+    const w = sbCanvas.width, ht = sbCanvas.height;
+    let grad = g.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(1, C.rgbToHex(C.hsbToRgb([h, 1, 1])));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+    grad = g.createLinearGradient(0, 0, 0, ht);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, '#000000');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+  }
+
+  function paintHueStrip() {
+    const g = hueCanvas.getContext('2d');
+    const w = hueCanvas.width, ht = hueCanvas.height;
+    const grad = g.createLinearGradient(0, 0, 0, ht);
+    for (let i = 0; i <= 6; i++) grad.addColorStop(i / 6, C.rgbToHex(C.hsbToRgb([i * 60, 1, 1])));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, ht);
+  }
+
+  function drawPicker() {
+    const [h, s, v] = state.hsb;
+    const grew = sizeCanvas(sbCanvas);
+    if (sizeCanvas(hueCanvas) || grew) paintHueStrip();
+    if (grew || pickerHue !== h) { pickerHue = h; paintSquare(h); }
+    const dot = $('#col-sb-dot').style;
+    dot.left = (s * 100) + '%';
+    dot.top = ((1 - v) * 100) + '%';
+    $('#col-hue-bar').style.top = (h / 360 * 100) + '%';
+  }
+
+  // Drag anywhere in a picker surface: live while the pointer is down, one
+  // history entry when it comes up, same as the component sliders.
+  function pickerDrag(el, fn) {
+    let down = false;
+    const at = e => {
+      const r = el.getBoundingClientRect();
+      const x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      const y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      state.hsb = fn(x, y);
+      pushColor(pickedColor(state.hsb), true);
+    };
+    el.addEventListener('pointerdown', e => {
+      down = true;
+      blurPanelField();
+      el.setPointerCapture(e.pointerId);
+      at(e);
+      e.preventDefault();
+    });
+    el.addEventListener('pointermove', e => { if (down) at(e); });
+    el.addEventListener('pointerup', e => {
+      if (!down) return;
+      down = false;
+      el.releasePointerCapture(e.pointerId);
+      if (C.commit(state.history, state.doc)) scheduleAutosave();
+    });
+  }
+  pickerDrag(sbCanvas, (x, y) => [state.hsb[0], x, 1 - y]);
+  pickerDrag(hueCanvas, (x, y) => [y * 360, state.hsb[1], state.hsb[2]]);
+
   const colSliders = $('#col-sliders');
   let sliderModel = null;
 
@@ -3646,6 +3773,9 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
       const push = (v, live) => {
         const vals = COLOR_MODELS[sliderModel].map((c, j) => +colSliders.children[j].children[1].value);
         vals[i] = v;
+        // HSB typed here is authoritative — take it before the color round
+        // trips, or a hue set on a gray would have nowhere to survive.
+        if (sliderModel === 'hsb') state.hsb = [vals[0], vals[1] / 100, vals[2] / 100];
         pushColor(modelToColor(vals, sliderModel), live);
       };
       range.addEventListener('input', () => push(+range.value, true));
@@ -3672,6 +3802,8 @@ if (typeof window !== 'undefined') window.PDFIO = PDFIO;
         col ? C.colorHex(col) : (kind === 'fill' ? '#ffffff' : '#ffffff');
     }
     const col = state.pick[state.target];
+    rememberHsb(col);
+    drawPicker();
     setVal($('#col-hex'), C.colorHex(col));
     setVal($('#col-model'), state.colorModel);
     colorToModel(col, state.colorModel).forEach((v, i) => {

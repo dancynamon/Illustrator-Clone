@@ -160,6 +160,26 @@
   .fscol .pbtns { margin-top: 0; }
   #fs-ink { color: var(--text-dim); padding: 3px 0 0; min-height: 16px; }
 
+  /* color picker: saturation/brightness square beside a hue strip. The
+     markers are elements over the canvases rather than drawn into them, so a
+     repaint only costs a style write unless the hue itself moved. */
+  .picker { display: flex; gap: 6px; margin: 8px 0 6px; }
+  .picker .sq, .picker .strip {
+    position: relative; height: 124px; border: 1px solid #4a4a4a; background: #000;
+  }
+  .picker .sq { flex: 1; min-width: 0; }
+  .picker .strip { width: 14px; flex: none; }
+  .picker canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  #col-sb-dot {
+    position: absolute; width: 11px; height: 11px; margin: -6px 0 0 -6px; border-radius: 50%;
+    border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75), inset 0 0 0 1px rgba(0,0,0,.45);
+    pointer-events: none;
+  }
+  #col-hue-bar {
+    position: absolute; left: -3px; right: -3px; height: 3px; margin-top: -1.5px;
+    border: 1px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none;
+  }
+
   /* color picker rows */
   .crow { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
   .crow label { width: 12px; color: var(--text-dim); }
@@ -293,6 +313,14 @@
               <option value="hsb">HSB</option>
             </select>
           </div>
+        </div>
+      </div>
+      <div class="picker">
+        <div class="sq" title="Saturation and brightness">
+          <canvas id="col-sb"></canvas><i id="col-sb-dot"></i>
+        </div>
+        <div class="strip" title="Hue">
+          <canvas id="col-hue"></canvas><i id="col-hue-bar"></i>
         </div>
       </div>
       <div id="col-sliders"></div>
