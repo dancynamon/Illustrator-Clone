@@ -1771,24 +1771,39 @@
     box.innerHTML = '';
     if (!state.issues) return;
     if (!state.issues.length) {
-      box.appendChild(issueRow('ok', 'No preflight problems found.'));
+      box.appendChild(issueRow({ level: 'ok', message: 'No preflight problems found.' }));
       return;
     }
-    for (const it of state.issues) box.appendChild(issueRow(it.level, it.message, it.ids));
+    for (const it of state.issues) box.appendChild(issueRow(it));
   }
 
-  function issueRow(level, message, ids) {
+  // Issues one click away from being resolved say so: preflight names the
+  // fix (issue.fix), the panel knows how to run it.
+  const ISSUE_FIXES = {
+    paper: { label: 'Switch to Paper', run: () => setSubstrate(null) },
+  };
+
+  function issueRow(it) {
     const div = document.createElement('div');
-    div.className = 'issue' + (level === 'error' ? ' error' : level === 'ok' ? ' ok' : '');
+    div.className = 'issue' + (it.level === 'error' ? ' error' : it.level === 'ok' ? ' ok' : '');
     const dot = document.createElement('span');
     dot.className = 'dot';
-    dot.textContent = level === 'ok' ? '✓' : '▲';
+    dot.textContent = it.level === 'ok' ? '✓' : '▲';
     const txt = document.createElement('span');
-    txt.textContent = message;
-    if (ids && ids.length) { // click an issue to select what it is about
+    txt.textContent = it.message;
+    if (it.ids && it.ids.length) { // click an issue to select what it is about
       txt.style.cursor = 'pointer';
       txt.title = 'Select the affected objects';
-      txt.addEventListener('click', () => { setSel(ids); render(); });
+      txt.addEventListener('click', () => { setSel(it.ids); render(); });
+    }
+    const fix = ISSUE_FIXES[it.fix];
+    if (fix) {
+      const a = document.createElement('span');
+      a.className = 'fix';
+      a.textContent = ' ' + fix.label;
+      a.title = fix.label + ' (undoable)';
+      a.addEventListener('click', () => { fix.run(); doPreflight(); });
+      txt.appendChild(a);
     }
     div.append(dot, txt);
     return div;

@@ -255,6 +255,10 @@
     display: flex; gap: 6px; padding: 3px 0; color: var(--text-dim); line-height: 1.35;
   }
   #preflight .issue .dot { color: #d8a13a; }
+  #preflight .issue .fix {
+    color: var(--accent); cursor: pointer; text-decoration: underline; white-space: nowrap;
+  }
+  #preflight .issue .fix:hover { color: #6ab0f5; }
   #preflight .issue.error .dot { color: #e0604a; }
   #preflight .issue.ok .dot { color: #6cb33f; }
 
@@ -2817,7 +2821,8 @@ const SEPARATE = (() => {
   // ---------- preflight ----------
   // Everything that bites on press, checked before plates go out the door.
   // An issue carries scope:'flat' when it only concerns the flat artboard
-  // PDF and has no bearing on plates, so plate export can skip it.
+  // PDF and has no bearing on plates, so plate export can skip it, and
+  // fix:'<name>' when the caller can offer a one-click way out of it.
   function preflight(doc, opts = {}) {
     const minStroke = opts.minStroke != null ? opts.minStroke : HAIRLINE_PT;
     const issues = [];
@@ -2830,7 +2835,7 @@ const SEPARATE = (() => {
     const substrate = substrateOf(doc);
     if (substrate) {
       issues.push({
-        level: 'warn', code: 'substrate', scope: 'flat',
+        level: 'warn', code: 'substrate', scope: 'flat', fix: 'paper',
         message: 'Substrate ' + substrate + ' is set, so a flat PDF export lays it down ' +
           'as a full-bleed flood. Fine for a proof; switch to Paper before sending ' +
           'artwork to a printer. Plates are unaffected.',
@@ -7387,24 +7392,39 @@ if (typeof window !== 'undefined') window.VECTRACE = VECTRACE;
     box.innerHTML = '';
     if (!state.issues) return;
     if (!state.issues.length) {
-      box.appendChild(issueRow('ok', 'No preflight problems found.'));
+      box.appendChild(issueRow({ level: 'ok', message: 'No preflight problems found.' }));
       return;
     }
-    for (const it of state.issues) box.appendChild(issueRow(it.level, it.message, it.ids));
+    for (const it of state.issues) box.appendChild(issueRow(it));
   }
 
-  function issueRow(level, message, ids) {
+  // Issues one click away from being resolved say so: preflight names the
+  // fix (issue.fix), the panel knows how to run it.
+  const ISSUE_FIXES = {
+    paper: { label: 'Switch to Paper', run: () => setSubstrate(null) },
+  };
+
+  function issueRow(it) {
     const div = document.createElement('div');
-    div.className = 'issue' + (level === 'error' ? ' error' : level === 'ok' ? ' ok' : '');
+    div.className = 'issue' + (it.level === 'error' ? ' error' : it.level === 'ok' ? ' ok' : '');
     const dot = document.createElement('span');
     dot.className = 'dot';
-    dot.textContent = level === 'ok' ? '✓' : '▲';
+    dot.textContent = it.level === 'ok' ? '✓' : '▲';
     const txt = document.createElement('span');
-    txt.textContent = message;
-    if (ids && ids.length) { // click an issue to select what it is about
+    txt.textContent = it.message;
+    if (it.ids && it.ids.length) { // click an issue to select what it is about
       txt.style.cursor = 'pointer';
       txt.title = 'Select the affected objects';
-      txt.addEventListener('click', () => { setSel(ids); render(); });
+      txt.addEventListener('click', () => { setSel(it.ids); render(); });
+    }
+    const fix = ISSUE_FIXES[it.fix];
+    if (fix) {
+      const a = document.createElement('span');
+      a.className = 'fix';
+      a.textContent = ' ' + fix.label;
+      a.title = fix.label + ' (undoable)';
+      a.addEventListener('click', () => { fix.run(); doPreflight(); });
+      txt.appendChild(a);
     }
     div.append(dot, txt);
     return div;

@@ -425,7 +425,8 @@ const SEPARATE = (() => {
   // ---------- preflight ----------
   // Everything that bites on press, checked before plates go out the door.
   // An issue carries scope:'flat' when it only concerns the flat artboard
-  // PDF and has no bearing on plates, so plate export can skip it.
+  // PDF and has no bearing on plates, so plate export can skip it, and
+  // fix:'<name>' when the caller can offer a one-click way out of it.
   function preflight(doc, opts = {}) {
     const minStroke = opts.minStroke != null ? opts.minStroke : HAIRLINE_PT;
     const issues = [];
@@ -438,7 +439,7 @@ const SEPARATE = (() => {
     const substrate = substrateOf(doc);
     if (substrate) {
       issues.push({
-        level: 'warn', code: 'substrate', scope: 'flat',
+        level: 'warn', code: 'substrate', scope: 'flat', fix: 'paper',
         message: 'Substrate ' + substrate + ' is set, so a flat PDF export lays it down ' +
           'as a full-bleed flood. Fine for a proof; switch to Paper before sending ' +
           'artwork to a printer. Plates are unaffected.',
