@@ -149,10 +149,20 @@
 
   function applyDragMatrix(m) {
     const byId = new Map(state.doc.shapes.map(s => [s.id, s]));
+    const rigid = isRigid(m);
     for (const [id, cmds] of state.drag.orig) {
       const s = byId.get(id);
-      if (s) s.cmds = C.transformCmds(cmds, m);
+      if (!s) continue;
+      s.cmds = C.transformCmds(cmds, m);
+      if (rigid) carryOffset(s, m);
     }
+  }
+  // Rotation/translation only: lengths survive, so a cached offset path can
+  // ride along. A scale changes the stroke-to-shape ratio and must re-offset.
+  function isRigid(m) {
+    const [a, b, c, d] = m, eps = 1e-9;
+    return Math.abs(a * a + b * b - 1) < eps && Math.abs(c * c + d * d - 1) < eps &&
+      Math.abs(a * c + b * d) < eps && Math.abs(a * d - b * c - 1) < eps;
   }
   function snapshotSel() {
     return new Map(selShapes().map(s => [s.id, JSON.parse(JSON.stringify(s.cmds))]));
@@ -414,15 +424,36 @@
   // result per shape and redo it only when the geometry — or the stroke that
   // shaped it — changes. Drags replace s.cmds outright, so identity is enough.
   const offsetCache = new WeakMap();
+  function offsetKey(st) {
+    return C.strokeProp(st, 'align') + '|' + st.w + '|' +
+      C.strokeProp(st, 'join') + '|' + C.strokeProp(st, 'miter');
+  }
   function alignedPath(s) {
     const st = s.stroke;
-    const key = C.strokeProp(st, 'align') + '|' + st.w + '|' +
-      C.strokeProp(st, 'join') + '|' + C.strokeProp(st, 'miter');
+    const key = offsetKey(st);
     const hit = offsetCache.get(s);
     if (hit && hit.key === key && hit.cmds === s.cmds) return hit.path;
     const path = C.strokeOffsetPath(s.cmds, st);
     offsetCache.set(s, { key, cmds: s.cmds, path });
     return path;
+  }
+  // A rigid drag replaces s.cmds every pointer move, which would miss the
+  // cache and re-offset every aligned stroke per frame. The offset of a moved
+  // shape is the moved offset, so transform the pre-drag one instead. The base
+  // lives on the drag object, so it can never outlive the drag it belongs to.
+  function carryOffset(s, m) {
+    const st = s.stroke;
+    if (!st || C.strokeProp(st, 'align') === 'center') return;
+    const d = state.drag;
+    if (!d.offsetBase) d.offsetBase = new Map();
+    let base = d.offsetBase.get(s.id);
+    if (!base) {
+      const hit = offsetCache.get(s); // still holds the pre-drag entry
+      if (!hit || hit.key !== offsetKey(st)) return; // stale: let alignedPath redo it
+      base = { key: hit.key, path: hit.path };
+      d.offsetBase.set(s.id, base);
+    }
+    offsetCache.set(s, { key: base.key, cmds: s.cmds, path: base.path && C.transformCmds(base.path, m) });
   }
 
   // Canvas only centers strokes. An inside or outside stroke is a centered one
@@ -462,6 +493,16 @@
       ctx.stroke();
     }
     ctx.setLineDash([]);
+  }
+
+  // Pointer events can land several times per frame; drawing once per
+  // animation frame keeps a drag from paying for each of them. Anything that
+  // must see the canvas up to date right now still calls render() directly.
+  let renderQueued = false;
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => { renderQueued = false; render(); });
   }
 
   function render() {
@@ -670,6 +711,12 @@
     } else {
       selEl.textContent = '—';
     }
+    // Mid-drag, everything below this line would be re-synced on every frame
+    // for nothing but the Transform fields. Keep those live (X/Y/W/H follow
+    // the pointer, as in Illustrator) and skip the rest; the pointer-up render
+    // runs the full sync once the drag is over.
+    const sampling = state.drag && state.drag.kind === 'sample'; // eyedropper paints the panel live
+    if ((state.drag && !sampling) || state.pan || state.draw) { updateTransform(); return; }
     syncOverprintButtons();
     const units = selUnitCount();
     document.querySelectorAll('.alignrow button[data-align]').forEach(btn => {
@@ -2118,7 +2165,7 @@
     const d = state.draw;
     d.wx1 = wx; d.wy1 = wy;
     d.square = e.shiftKey; d.center = e.altKey;
-    render();
+    scheduleRender();
   }
   function onShapeToolUp() {
     const d = state.draw;
@@ -2201,7 +2248,7 @@
       p.hoverClose = penCloseTarget(wx, wy);
       stagewrap.classList.toggle('pen-close', p.hoverClose);
     }
-    render();
+    scheduleRender();
   }
 
   function onPenUp() {
@@ -2315,7 +2362,7 @@
       }
       s.cmds = C.anchorsToPath(subs);
     }
-    render();
+    scheduleRender();
   }
 
   function onHandleDragMove(d, e, wx, wy) {
@@ -2325,7 +2372,7 @@
     d.moved = true;
     C.moveHandle(d.subs[d.si], d.ai, d.which, wx, wy, d.broke ? 'none' : undefined);
     s.cmds = C.anchorsToPath(d.subs);
-    render();
+    scheduleRender();
   }
 
   function finishAnchorMarquee(d) {
@@ -2464,7 +2511,7 @@
   canvas.addEventListener('pointermove', e => {
     if (state.pan) {
       state.view = C.panBy(state.pan.view0, e.clientX - state.pan.sx, e.clientY - state.pan.sy);
-      render();
+      scheduleRender();
     }
     const [sx, sy] = screenPt(e);
     const [wx, wy] = worldPt(e);
@@ -2488,7 +2535,7 @@
           }
           d.moved = true;
           applyDragMatrix(C.mTranslate(dx, dy));
-          render();
+          scheduleRender();
         }
       } else if (d.kind === 'scale') {
         let fx = 1, fy = 1;
@@ -2499,7 +2546,7 @@
         if (isFinite(fx) && isFinite(fy)) {
           d.moved = true;
           applyDragMatrix(C.mScale(fx, fy, d.ax, d.ay));
-          render();
+          scheduleRender();
         }
       } else if (d.kind === 'rotate') {
         let da = Math.atan2(wy - d.cy, wx - d.cx) - d.a0;
@@ -2507,11 +2554,11 @@
         d.moved = true;
         d.da = da;
         applyDragMatrix(C.mRotate(da, d.cx, d.cy));
-        render();
+        scheduleRender();
       } else if (d.kind === 'marquee' || d.kind === 'amarquee') {
         d.m1 = [sx, sy];
         d.moved = true;
-        render();
+        scheduleRender();
       } else if (d.kind === 'sample') {
         applySample(sampleAppearance(wx, wy), d.shift, true);
         showSample(wx, wy);
@@ -2691,6 +2738,7 @@
     mutate, doUndo, doRedo, newFile, openFile, saveFile, applyNewDoc,
     openAnyFile, exportPdfFile,
     setSel, selectAll, doGroup, doUngroup, doArrange, doDelete, nudge,
+    applyDragMatrix, updateReadouts,
     renderLayers, markLayerRows, updateTransform, applyTransformField, setRef,
     doAddLayer, doDuplicateLayer, doDeleteLayer, doLock, doHide, doUnlockAll, doShowAll,
     setTarget, pushColor, pushOpacity, swapPaints, defaultPaints,
