@@ -2340,7 +2340,8 @@ const VECCORE = (() => {
     const spotCol = swatchColor(spot);
     addShape(doc, {
       type: 'path', name: 'Rounded rect',
-      fill: '#2f6fb3', fillInfo: { space: 'cmyk', values: [0.74, 0.38, 0, 0.3] },
+      fill: colorHex(makeColor({ space: 'cmyk', values: [0.74, 0.38, 0, 0.3] })),
+      fillInfo: { space: 'cmyk', values: [0.74, 0.38, 0, 0.3] },
       stroke: null, opacity: 1,
       cmds: rectPath(1 * 72, 1 * 72, 3 * 72, 2 * 72, 18),
     });
@@ -2354,7 +2355,8 @@ const VECCORE = (() => {
     });
     addShape(doc, {
       type: 'path', name: 'Star',
-      fill: '#e8862e', fillInfo: { space: 'cmyk', values: [0, 0.42, 0.8, 0.09] },
+      fill: colorHex(makeColor({ space: 'cmyk', values: [0, 0.42, 0.8, 0.09] })),
+      fillInfo: { space: 'cmyk', values: [0, 0.42, 0.8, 0.09] },
       stroke: null, opacity: 1,
       cmds: starPath(3.4 * 72, 6.6 * 72, 1.5 * 72, 0.62 * 72, 5),
     });
