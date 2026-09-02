@@ -8,6 +8,11 @@ const VECCORE = (() => {
   const PT_PER = { in: 72, mm: 72 / 25.4, pt: 1 };
   // 100% zoom = 96 CSS px per inch (screen convention), i.e. 96/72 px per pt.
   const PX_PER_PT_100 = 96 / 72;
+  const DEG = Math.PI / 180;
+
+  // Document points <-> display units (panels type in doc.units, we store pt).
+  function toPt(v, units) { return v * (PT_PER[units] || 1); }
+  function fromPt(v, units) { return v / (PT_PER[units] || 1); }
 
   // ---------- document ----------
   function newDoc(o = {}) {
@@ -17,9 +22,13 @@ const VECCORE = (() => {
       name: o.name || 'Untitled',
       units,
       artboard: { w: (o.w != null ? o.w : 8.5) * k, h: (o.h != null ? o.h : 11) * k },
+      // Material the piece prints on: hex, or null for white paper. Foam and
+      // signage jobs run on colored stock, and white ink only reads on it.
+      substrate: o.substrate || null,
       layers: [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }],
       shapes: [],
       groups: [],
+      swatches: defaultSwatches(),
       nextId: 1,
     };
   }
@@ -31,8 +40,137 @@ const VECCORE = (() => {
     if (shape.stroke === undefined) shape.stroke = null;
     if (shape.opacity == null) shape.opacity = 1;
     if (shape.group === undefined) shape.group = null;
+    if (shape.hidden === undefined) shape.hidden = false;
+    if (shape.locked === undefined) shape.locked = false;
+    // Bookkeeping for the Transform panel: the rotate/shear already baked into
+    // cmds, in degrees. Geometry never reads these.
+    if (shape.angle == null) shape.angle = 0;
+    if (shape.shear == null) shape.shear = 0;
     doc.shapes.push(shape);
     return shape;
+  }
+
+  // ---------- color ----------
+  // Paints are stored the way the PDF bridge already stores them: a hex
+  // string for the on-screen preview (shape.fill / shape.stroke.color) plus,
+  // for print spaces only, the real ink data alongside it in shape.fillInfo /
+  // shape.strokeInfo — {space, values, name?, alt?}. Every conversion between
+  // spaces lives here so the panels, the swatches and the PDF exporter all
+  // agree on what a color is. Components are 0..1 throughout; HSB hue is the
+  // one exception and is in degrees.
+  const COLOR_SPACES = { rgb: 3, cmyk: 4, gray: 1, separation: 1 };
+  const PRINT_SPACES = { cmyk: 1, gray: 1, separation: 1 };
+
+  function clamp01(v) { return !isFinite(v) ? 0 : v < 0 ? 0 : v > 1 ? 1 : v; }
+
+  // Returns null (not black) on anything unparseable so callers can reject
+  // half-typed input instead of silently painting with it.
+  function hexToRgb(hex) {
+    let h = String(hex == null ? '' : hex).trim().replace(/^#/, '');
+    if (h.length === 3) h = h.replace(/./g, c => c + c);
+    if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+    const n = parseInt(h, 16);
+    return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  }
+
+  function rgbToHex(rgb) {
+    return '#' + rgb.map(v => Math.round(clamp01(v) * 255).toString(16).padStart(2, '0')).join('');
+  }
+
+  function cmykToRgb(v) {
+    const k = clamp01(v[3]);
+    return [clamp01(v[0]), clamp01(v[1]), clamp01(v[2])].map(c => (1 - c) * (1 - k));
+  }
+
+  // Naive separation (no profiles), matching the exporter's device CMYK:
+  // pull the common ink out as K. Round-trips cmykToRgb for K-only builds.
+  function rgbToCmyk(v) {
+    const r = clamp01(v[0]), g = clamp01(v[1]), b = clamp01(v[2]);
+    const k = 1 - Math.max(r, g, b);
+    if (k >= 1) return [0, 0, 0, 1];
+    return [(1 - r - k) / (1 - k), (1 - g - k) / (1 - k), (1 - b - k) / (1 - k), k];
+  }
+
+  // HSB (= HSV): hue in degrees 0..360, saturation and brightness 0..1.
+  function rgbToHsb(v) {
+    const r = clamp01(v[0]), g = clamp01(v[1]), b = clamp01(v[2]);
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d) {
+      if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60;
+    }
+    return [h, mx ? d / mx : 0, mx];
+  }
+
+  function hsbToRgb(v) {
+    const h = ((v[0] % 360) + 360) % 360, s = clamp01(v[1]), b = clamp01(v[2]);
+    const i = Math.floor(h / 60), f = h / 60 - i;
+    const p = b * (1 - s), q = b * (1 - s * f), t = b * (1 - s * (1 - f));
+    switch (i % 6) {
+      case 0: return [b, t, p];
+      case 1: return [q, b, p];
+      case 2: return [p, b, t];
+      case 3: return [p, q, b];
+      case 4: return [t, p, b];
+      default: return [b, p, q];
+    }
+  }
+
+  function spaceToRgb(space, values) {
+    if (space === 'cmyk') return cmykToRgb(values);
+    if (space === 'gray') { const g = clamp01(values[0]); return [g, g, g]; }
+    return [clamp01(values[0]), clamp01(values[1]), clamp01(values[2])];
+  }
+
+  // Normalize anything color-shaped (picker output, importer palette entry,
+  // swatch) into {space, values, rgb, name?, alt?}. null means "none".
+  function makeColor(o) {
+    if (!o || !COLOR_SPACES[o.space]) return null;
+    const space = o.space, n = COLOR_SPACES[space];
+    const values = [];
+    for (let i = 0; i < n; i++) values.push(clamp01(Array.isArray(o.values) ? o.values[i] : 0));
+    if (space !== 'separation') return { space, values, rgb: spaceToRgb(space, values) };
+    // A spot ink is one tint value; its look comes from the alternate build,
+    // which is what keeps the plate identifiable all the way through export.
+    const col = { space, values, rgb: null, name: String(o.name || 'Spot') };
+    const a = o.alt;
+    if (a && COLOR_SPACES[a.space] && a.space !== 'separation' && Array.isArray(a.values)) {
+      const an = COLOR_SPACES[a.space];
+      col.alt = { space: a.space, values: a.values.slice(0, an).map(clamp01) };
+    }
+    if (Array.isArray(o.rgb) && o.rgb.length === 3) col.rgb = o.rgb.map(clamp01);
+    else if (col.alt) col.rgb = spaceToRgb(col.alt.space, col.alt.values);
+    else { const g = 1 - values[0]; col.rgb = [g, g, g]; } // unknown ink: tint as darkness
+    return col;
+  }
+
+  function colorHex(col) { return col ? rgbToHex(col.rgb) : null; }
+
+  // The part of a color worth storing next to the hex preview. RGB is fully
+  // described by the hex already; print spaces are not.
+  function colorInfo(col) {
+    if (!col || !PRINT_SPACES[col.space]) return null;
+    const o = { space: col.space, values: col.values.slice() };
+    if (col.name) o.name = col.name;
+    if (col.alt) o.alt = { space: col.alt.space, values: col.alt.values.slice() };
+    return o;
+  }
+
+  // Inverse: rebuild a full color from a shape's stored hex + print info.
+  function paintColor(hex, info) {
+    if (hex == null) return null;
+    const rgb = hexToRgb(hex) || [0, 0, 0];
+    if (info && COLOR_SPACES[info.space]) return makeColor({ ...info, rgb });
+    return makeColor({ space: 'rgb', values: rgb });
+  }
+
+  function colorEquals(a, b) {
+    if (!a || !b) return a === b;
+    return a.space === b.space && (a.name || '') === (b.name || '') &&
+      a.values.length === b.values.length && a.values.every((v, i) => Math.abs(v - b.values[i]) < 1e-6);
   }
 
   // ---------- view (world pt <-> screen px) ----------
@@ -103,6 +241,22 @@ const VECCORE = (() => {
     return cmds;
   }
 
+  // Rect from a rubber-band drag: (ax,ay) is where the pointer went down.
+  // square constrains to the larger axis, fromCenter grows both ways from the
+  // anchor — the Shift/Alt rules the rectangle and ellipse tools share.
+  function dragRect(ax, ay, bx, by, square = false, fromCenter = false) {
+    let dx = bx - ax, dy = by - ay;
+    if (square) {
+      const s = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = dx < 0 ? -s : s;
+      dy = dy < 0 ? -s : s;
+    }
+    if (fromCenter) {
+      return { x: ax - Math.abs(dx), y: ay - Math.abs(dy), w: Math.abs(dx) * 2, h: Math.abs(dy) * 2 };
+    }
+    return { x: Math.min(ax, ax + dx), y: Math.min(ay, ay + dy), w: Math.abs(dx), h: Math.abs(dy) };
+  }
+
   // Bounding box over all coordinates in the command list (control points
   // included — conservative for curves, exact for the shapes above).
   function pathBBox(cmds) {
@@ -117,6 +271,154 @@ const VECCORE = (() => {
     }
     if (x0 === Infinity) return null;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  // ---------- anchor model (path editing) ----------
+  // The editable view of a command list: subpaths of anchors, Illustrator-style.
+  // subpath = {anchors:[{x,y,in:[x,y]|null,out:[x,y]|null}], closed}
+  // Handles are absolute points so they transform like anything else. Every
+  // path this app can build survives pathToAnchors → anchorsToPath unchanged.
+  const HANDLE_SIDES = ['in', 'out'];
+  const ANCHOR_EPS = 1e-9;
+
+  function anchorKey(si, ai) { return si + ':' + ai; }
+  function handleKey(si, ai, which) { return si + ':' + ai + ':' + which; }
+
+  function pathToAnchors(cmds) {
+    const subs = [];
+    let cur = null;
+    for (const c of cmds) {
+      if (c[0] === 'M') {
+        cur = { anchors: [{ x: c[1], y: c[2], in: null, out: null }], closed: false };
+        subs.push(cur);
+      } else if (!cur) {
+        continue;
+      } else if (c[0] === 'L') {
+        cur.anchors.push({ x: c[1], y: c[2], in: null, out: null });
+      } else if (c[0] === 'C') {
+        cur.anchors[cur.anchors.length - 1].out = [c[1], c[2]];
+        cur.anchors.push({ x: c[5], y: c[6], in: [c[3], c[4]], out: null });
+      } else if (c[0] === 'Z') {
+        cur.closed = true;
+        // A closing curve lands back on the start anchor; fold it away so the
+        // ring carries one anchor per corner.
+        const a = cur.anchors;
+        if (a.length > 1) {
+          const last = a[a.length - 1];
+          if (Math.abs(last.x - a[0].x) <= ANCHOR_EPS && Math.abs(last.y - a[0].y) <= ANCHOR_EPS) {
+            a[0].in = last.in;
+            a.pop();
+          }
+        }
+        cur = null;
+      }
+    }
+    return subs;
+  }
+
+  function anchorsToPath(subs) {
+    const cmds = [];
+    for (const sub of subs) {
+      const a = sub.anchors;
+      if (!a.length) continue;
+      cmds.push(['M', a[0].x, a[0].y]);
+      const segs = sub.closed ? a.length : a.length - 1;
+      for (let i = 0; i < segs; i++) {
+        const p = a[i], q = a[(i + 1) % a.length];
+        if (p.out || q.in) {
+          const c1 = p.out || [p.x, p.y], c2 = q.in || [q.x, q.y];
+          cmds.push(['C', c1[0], c1[1], c2[0], c2[1], q.x, q.y]);
+        } else if (!sub.closed || i < segs - 1) {
+          cmds.push(['L', q.x, q.y]); // the straight closing segment is Z's job
+        }
+      }
+      if (sub.closed) cmds.push(['Z']);
+    }
+    return cmds;
+  }
+
+  function moveAnchor(sub, i, dx, dy) {
+    const a = sub.anchors[i];
+    if (!a) return;
+    a.x += dx; a.y += dy;
+    for (const which of HANDLE_SIDES) {
+      if (a[which]) { a[which][0] += dx; a[which][1] += dy; }
+    }
+  }
+
+  // Smooth = both handles present and pointing opposite ways through the point.
+  // This is what decides whether dragging one handle should swing the other.
+  function isSmoothAnchor(a) {
+    if (!a || !a.in || !a.out) return false;
+    const ix = a.in[0] - a.x, iy = a.in[1] - a.y;
+    const ox = a.out[0] - a.x, oy = a.out[1] - a.y;
+    const li = Math.hypot(ix, iy), lo = Math.hypot(ox, oy);
+    if (li < 1e-6 || lo < 1e-6) return false;
+    return (ix * ox + iy * oy) / (li * lo) < -1 + 1e-6;
+  }
+
+  // Drag one handle to (x,y). mirror: 'none' breaks the pair, 'angle' swings
+  // the opposite handle to stay collinear at its own length, 'full' makes it an
+  // exact reflection (and creates it if missing). Default follows smoothness.
+  function moveHandle(sub, i, which, x, y, mirror) {
+    const a = sub.anchors[i];
+    if (!a) return;
+    if (mirror == null) mirror = isSmoothAnchor(a) ? 'angle' : 'none';
+    a[which] = [x, y];
+    if (mirror === 'none') return;
+    const other = which === 'in' ? 'out' : 'in';
+    const dx = a.x - x, dy = a.y - y;
+    if (mirror === 'full') { a[other] = [a.x + dx, a.y + dy]; return; }
+    if (!a[other]) return;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-6) return;
+    const L = Math.hypot(a[other][0] - a.x, a[other][1] - a.y);
+    a[other] = [a.x + dx / d * L, a.y + dy / d * L];
+  }
+
+  // Drop the anchors named in sel (a Set of anchorKey strings) and re-stitch:
+  // the neighbours keep their handles, so the merged segment follows the old
+  // curve. Subpaths left with fewer than two anchors disappear.
+  function deleteAnchors(subs, sel) {
+    const out = [];
+    subs.forEach((sub, si) => {
+      const anchors = sub.anchors.filter((a, ai) => !sel.has(anchorKey(si, ai)));
+      if (anchors.length < 2) return;
+      out.push({ anchors, closed: sub.closed });
+    });
+    return out;
+  }
+
+  // Nearest anchor within tol (world units), or null.
+  function hitAnchor(subs, x, y, tol) {
+    let best = null, bd = tol;
+    subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+      const d = Math.hypot(a.x - x, a.y - y);
+      if (d <= bd) { bd = d; best = { si, ai }; }
+    }));
+    return best;
+  }
+
+  // Nearest handle within tol, limited to the handleKeys in live (null = all).
+  function hitAnchorHandle(subs, x, y, tol, live) {
+    let best = null, bd = tol;
+    subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+      for (const which of HANDLE_SIDES) {
+        if (!a[which]) continue;
+        if (live && !live.has(handleKey(si, ai, which))) continue;
+        const d = Math.hypot(a[which][0] - x, a[which][1] - y);
+        if (d <= bd) { bd = d; best = { si, ai, which }; }
+      }
+    }));
+    return best;
+  }
+
+  function anchorsInRect(subs, r) {
+    const keys = [];
+    subs.forEach((sub, si) => sub.anchors.forEach((a, ai) => {
+      if (a.x >= r.x && a.x <= r.x + r.w && a.y >= r.y && a.y <= r.y + r.h) keys.push(anchorKey(si, ai));
+    }));
+    return keys;
   }
 
   // ---------- affine matrices ----------
@@ -134,7 +436,30 @@ const VECCORE = (() => {
     const c = Math.cos(rad), s = Math.sin(rad);
     return [c, s, -s, c, cx - c * cx + s * cy, cy - s * cx - c * cy];
   }
+  // Horizontal shear about (cx,cy). Positive angle leans the top of the object
+  // to the right (italic), which is Illustrator's direction in y-down space.
+  function mShear(rad, cx = 0, cy = 0) {
+    const t = -Math.tan(rad);
+    return [1, 0, t, 1, -t * cy, 0];
+  }
   function mApply(m, x, y) { return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; }
+
+  // Transform-panel reference points, named like the bbox handles in the app.
+  const REF_FRAC = {
+    nw: [0, 0], n: [.5, 0], ne: [1, 0],
+    w: [0, .5], c: [.5, .5], e: [1, .5],
+    sw: [0, 1], s: [.5, 1], se: [1, 1],
+  };
+  function refPoint(b, ref) {
+    const f = REF_FRAC[ref] || REF_FRAC.nw;
+    return [b.x + f[0] * b.w, b.y + f[1] * b.h];
+  }
+
+  // Angles are reported in (-180,180] like Illustrator's rotate field.
+  function normAngle(a) {
+    const r = ((a + 180) % 360 + 360) % 360 - 180;
+    return r === -180 ? 180 : r;
+  }
 
   function transformCmds(cmds, m) {
     return cmds.map(c => {
@@ -235,9 +560,10 @@ const VECCORE = (() => {
 
   // Fill hit uses nonzero winding summed across subpaths (canvas default, so
   // holes behave like they render). Stroke hit uses distance to the outline.
+  // Placed images have no fill but are solid over their placement frame.
   function hitTestShape(shape, x, y, tol = 2) {
     const subs = flattenPath(shape.cmds);
-    if (shape.fill != null) {
+    if (shape.fill != null || shape.type === 'image') {
       let wn = 0;
       for (const s of subs) wn += windingNumber(s.pts, x, y);
       if (wn !== 0) return true;
@@ -372,6 +698,237 @@ const VECCORE = (() => {
     }
   }
 
+  // ---------- layers ----------
+  // doc.layers[0] is the top of the Layers panel and the frontmost layer, so
+  // its shapes live at the END of doc.shapes. normalizeZ restores that
+  // invariant after any z-order or layer edit; within a layer the existing
+  // shape order (and therefore bringToFront/sendBackward) is untouched.
+  function layerIndex(doc, id) { return doc.layers.findIndex(l => l.id === id); }
+  function layerOf(doc, id) { return doc.layers.find(l => l.id === id) || null; }
+
+  function normalizeZ(doc) {
+    const n = doc.layers.length;
+    const rank = new Map(doc.layers.map((l, i) => [l.id, n - 1 - i]));
+    doc.shapes = doc.shapes
+      .map((s, i) => [s, i])
+      .sort((a, b) => (rank.get(a[0].layer) || 0) - (rank.get(b[0].layer) || 0) || a[1] - b[1])
+      .map(p => p[0]);
+  }
+
+  function newLayerId(doc) {
+    let n = 0;
+    for (const l of doc.layers) {
+      const m = /^L(\d+)$/.exec(l.id);
+      if (m) n = Math.max(n, +m[1]);
+    }
+    return 'L' + (n + 1);
+  }
+
+  // New layers land above the given layer (above the top when unspecified).
+  function addLayer(doc, name, aboveId) {
+    const id = newLayerId(doc);
+    const l = { id, name: name || 'Layer ' + id.slice(1), visible: true, locked: false };
+    const at = aboveId ? layerIndex(doc, aboveId) : 0;
+    doc.layers.splice(at < 0 ? 0 : at, 0, l);
+    normalizeZ(doc);
+    return l;
+  }
+
+  // Drop group registry entries no shape refers to any more.
+  function pruneGroups(doc) {
+    const live = new Set();
+    for (const s of doc.shapes) {
+      let gid = s.group, seen = new Set();
+      while (gid && !seen.has(gid)) {
+        live.add(gid); seen.add(gid);
+        const g = groupEntry(doc, gid);
+        gid = g ? g.parent : null;
+      }
+    }
+    doc.groups = (doc.groups || []).filter(g => live.has(g.id));
+  }
+
+  // Deletes the layer and everything on it. The last layer never goes away.
+  function deleteLayer(doc, id) {
+    if (doc.layers.length < 2 || layerIndex(doc, id) < 0) return false;
+    doc.layers = doc.layers.filter(l => l.id !== id);
+    doc.shapes = doc.shapes.filter(s => s.layer !== id);
+    pruneGroups(doc);
+    return true;
+  }
+
+  function renameLayer(doc, id, name) {
+    const l = layerOf(doc, id);
+    if (!l) return false;
+    l.name = String(name || '').trim() || l.name;
+    return true;
+  }
+
+  function reorderLayers(doc, from, to) {
+    const n = doc.layers.length;
+    if (from < 0 || from >= n || to < 0 || to >= n || from === to) return false;
+    const [l] = doc.layers.splice(from, 1);
+    doc.layers.splice(to, 0, l);
+    normalizeZ(doc);
+    return true;
+  }
+
+  // Copy a layer and its contents onto a fresh layer directly above it.
+  function duplicateLayer(doc, id) {
+    const src = layerOf(doc, id);
+    if (!src) return null;
+    const ids = doc.shapes.filter(s => s.layer === id).map(s => s.id);
+    const l = addLayer(doc, src.name + ' copy', id);
+    l.visible = src.visible;
+    l.locked = src.locked;
+    for (const nid of duplicateShapes(doc, ids)) {
+      const s = doc.shapes.find(x => x.id === nid);
+      if (s) s.layer = l.id;
+    }
+    normalizeZ(doc);
+    return l;
+  }
+
+  // Move whole units onto a layer. anchorId + side ('front'|'back') drop them
+  // directly in front of / behind that shape; without an anchor they land at
+  // the front of the target layer. Returns the moved ids.
+  function moveShapesToLayer(doc, ids, layerId, anchorId = null, side = 'front') {
+    if (!layerOf(doc, layerId)) return [];
+    const set = new Set(expandIds(doc, ids));
+    const moved = doc.shapes.filter(s => set.has(s.id));
+    if (!moved.length) return [];
+    const rest = doc.shapes.filter(s => !set.has(s.id));
+    for (const s of moved) s.layer = layerId;
+    let at = rest.length;
+    const t = rest.findIndex(s => s.id === anchorId);
+    if (t >= 0) at = side === 'back' ? t : t + 1;
+    else for (let i = 0; i < rest.length; i++) if (rest[i].layer === layerId) at = i + 1;
+    doc.shapes = rest.slice(0, at).concat(moved, rest.slice(at));
+    normalizeZ(doc);
+    return moved.map(s => s.id);
+  }
+
+  // ---------- object visibility / lock ----------
+  // Flags live on shapes; group and layer rows in the panel derive from them.
+  // Ids are taken literally (no group expansion) so a nested group row can be
+  // toggled without dragging its parent along.
+  function setShapeFlags(doc, ids, patch) {
+    const set = new Set(ids);
+    let n = 0;
+    for (const s of doc.shapes) if (set.has(s.id)) { Object.assign(s, patch); n++; }
+    return n;
+  }
+  function lockShapes(doc, ids, on = true) { return setShapeFlags(doc, ids, { locked: !!on }); }
+  function hideShapes(doc, ids, on = true) { return setShapeFlags(doc, ids, { hidden: !!on }); }
+  function unlockAll(doc) { return setShapeFlags(doc, doc.shapes.map(s => s.id), { locked: false }); }
+  function showAll(doc) { return setShapeFlags(doc, doc.shapes.map(s => s.id), { hidden: false }); }
+
+  // ---------- layer tree (panel model) ----------
+  // The innermost group of `shape` whose parent is `parentGid`, or null when
+  // the shape is a direct child of that level.
+  function childGroupOf(doc, shape, parentGid) {
+    let gid = shape.group || null, seen = new Set();
+    while (gid && !seen.has(gid)) {
+      const g = groupEntry(doc, gid);
+      const p = g ? g.parent || null : null;
+      if (p === parentGid) return gid;
+      seen.add(gid);
+      gid = p;
+    }
+    return null;
+  }
+
+  // Rows for one nesting level, front-most first (panel order is reverse z).
+  function treeRows(doc, shapes, parentGid) {
+    const out = [], seen = new Set();
+    for (const s of shapes) {
+      const gid = childGroupOf(doc, s, parentGid);
+      if (!gid) {
+        out.push({
+          kind: 'shape', id: s.id, name: s.name || '<Path>', layer: s.layer,
+          ids: [s.id], visible: !s.hidden, locked: !!s.locked, children: [],
+        });
+        continue;
+      }
+      if (seen.has(gid)) continue;
+      seen.add(gid);
+      const members = shapes.filter(x => childGroupOf(doc, x, parentGid) === gid);
+      out.push({
+        kind: 'group', id: gid, name: '<Group>', layer: members[0].layer,
+        ids: members.map(x => x.id),
+        visible: members.some(x => !x.hidden),
+        locked: members.every(x => !!x.locked),
+        children: treeRows(doc, members, gid),
+      });
+    }
+    return out;
+  }
+
+  // Full panel model: layers top-to-bottom, each with its expandable rows.
+  function layerTree(doc) {
+    return doc.layers.map(l => ({
+      id: l.id, name: l.name, visible: l.visible, locked: !!l.locked,
+      rows: treeRows(doc, doc.shapes.filter(s => s.layer === l.id).reverse(), null),
+    }));
+  }
+
+  // ---------- numeric transform ----------
+  // Shared rotate/shear of a selection, or null where objects disagree.
+  function selectionAngles(doc, ids) {
+    const set = new Set(expandIds(doc, ids));
+    let angle = null, shear = null, mixA = false, mixS = false, first = true;
+    for (const s of doc.shapes) {
+      if (!set.has(s.id)) continue;
+      const a = s.angle || 0, h = s.shear || 0;
+      if (first) { angle = a; shear = h; first = false; }
+      else {
+        if (Math.abs(a - angle) > 1e-6) mixA = true;
+        if (Math.abs(h - shear) > 1e-6) mixS = true;
+      }
+    }
+    return { angle: mixA ? null : angle, shear: mixS ? null : shear };
+  }
+
+  // Matrix taking a selection bbox to the requested numeric state: scale to
+  // w/h, then shear, then rotate (all about the reference point), then move
+  // that point onto x/y. Omitted fields leave their axis alone; rotate/shear
+  // are deltas in radians.
+  function transformMatrix(b, spec) {
+    const [px, py] = refPoint(b, spec.ref);
+    const sx = spec.w != null && b.w > 1e-9 ? spec.w / b.w : 1;
+    const sy = spec.h != null && b.h > 1e-9 ? spec.h / b.h : 1;
+    let m = mScale(sx, sy, px, py);
+    if (spec.shear) m = mMul(mShear(spec.shear, px, py), m);
+    if (spec.rotate) m = mMul(mRotate(spec.rotate, px, py), m);
+    const dx = spec.x != null ? spec.x - px : 0;
+    const dy = spec.y != null ? spec.y - py : 0;
+    if (dx || dy) m = mMul(mTranslate(dx, dy), m);
+    return m;
+  }
+
+  // Apply Transform-panel values to a selection. x/y/w/h are absolute document
+  // points on the combined bbox; angle/shear are absolute degrees resolved
+  // against what the selection already carries.
+  function transformSelection(doc, ids, spec) {
+    const set = new Set(expandIds(doc, ids));
+    const shapes = doc.shapes.filter(s => set.has(s.id));
+    const b = shapesBBox(shapes);
+    if (!b) return false;
+    const cur = selectionAngles(doc, ids);
+    const dRot = spec.angle != null ? spec.angle - (cur.angle || 0) : 0;
+    const dShear = spec.shear != null ? spec.shear - (cur.shear || 0) : 0;
+    const m = transformMatrix(b, {
+      ref: spec.ref, x: spec.x, y: spec.y, w: spec.w, h: spec.h,
+      rotate: dRot * DEG, shear: dShear * DEG,
+    });
+    for (const s of shapes) {
+      s.cmds = transformCmds(s.cmds, m);
+      if (dRot) s.angle = normAngle((s.angle || 0) + dRot);
+      if (dShear) s.shear = normAngle((s.shear || 0) + dShear);
+    }
+    return true;
+  }
+
   // ---------- align & distribute ----------
   // Units move rigidly. Align modes reference the selection bbox; distribute
   // spaces unit centers evenly between the two extremes.
@@ -416,6 +973,471 @@ const VECCORE = (() => {
     }
   }
 
+  // ---------- fill, stroke & opacity ----------
+  // Each of these mutates the doc in place over a plain id list and leaves
+  // committing to the caller, so painting a whole selection is one undo step.
+  const STROKE_CAPS = { butt: 1, round: 1, square: 1 };
+  const STROKE_JOINS = { miter: 1, round: 1, bevel: 1 };
+  const STROKE_ALIGNS = { center: 1, inside: 1, outside: 1 };
+  const STROKE_DEFAULTS = { w: 1, cap: 'butt', join: 'miter', miter: 10, align: 'center' };
+
+  function eachShape(doc, ids, fn) {
+    const set = new Set(ids);
+    for (const s of doc.shapes) if (set.has(s.id)) fn(s);
+  }
+
+  // col === null paints "none".
+  function setFill(doc, ids, col) {
+    const hex = colorHex(col), info = colorInfo(col);
+    eachShape(doc, ids, s => {
+      s.fill = hex;
+      if (info) s.fillInfo = { ...info }; else delete s.fillInfo;
+    });
+  }
+
+  function setStroke(doc, ids, col) {
+    const hex = colorHex(col), info = colorInfo(col);
+    eachShape(doc, ids, s => {
+      if (hex == null) { s.stroke = null; delete s.strokeInfo; return; }
+      s.stroke = { ...(s.stroke || { w: STROKE_DEFAULTS.w }), color: hex };
+      if (info) s.strokeInfo = { ...info }; else delete s.strokeInfo;
+    });
+  }
+
+  // Weight/cap/join/miter/dash/align. Shapes with no stroke are skipped —
+  // a weight alone should never conjure a black outline out of nothing.
+  function setStrokeProps(doc, ids, props) {
+    eachShape(doc, ids, s => {
+      if (!s.stroke) return;
+      const st = { ...s.stroke };
+      if (props.w != null && isFinite(props.w)) st.w = Math.max(0, props.w);
+      if (STROKE_CAPS[props.cap]) st.cap = props.cap;
+      if (STROKE_JOINS[props.join]) st.join = props.join;
+      if (props.miter != null && isFinite(props.miter)) st.miter = Math.max(1, props.miter);
+      if (STROKE_ALIGNS[props.align]) st.align = props.align;
+      if (props.dash !== undefined) {
+        const d = parseDash(props.dash);
+        if (d) st.dash = d; else delete st.dash;
+      }
+      s.stroke = st;
+    });
+  }
+
+  function setOpacity(doc, ids, a) {
+    const v = clamp01(a);
+    eachShape(doc, ids, s => { s.opacity = v; });
+  }
+
+  // Everything about how a shape looks, in the form the setters take it back
+  // in. This is what the eyedropper carries: the print info rides along, so
+  // sampling a spot ink hands back the ink rather than a flattened preview.
+  function strokeAttrs(stroke) {
+    if (!stroke) return null;
+    return {
+      w: stroke.w,
+      cap: strokeProp(stroke, 'cap'),
+      join: strokeProp(stroke, 'join'),
+      miter: strokeProp(stroke, 'miter'),
+      align: strokeProp(stroke, 'align'),
+      dash: stroke.dash ? stroke.dash.slice() : [], // empty clears a dash on the target
+    };
+  }
+
+  function shapeAppearance(s) {
+    return {
+      fill: paintColor(s.fill, s.fillInfo),
+      stroke: s.stroke ? paintColor(s.stroke.color, s.strokeInfo) : null,
+      strokeAttrs: strokeAttrs(s.stroke),
+      opacity: s.opacity == null ? 1 : s.opacity,
+    };
+  }
+
+  // Paint an appearance onto a selection. Stroke color goes on before the
+  // attributes, because a shape that had no stroke only grows one at the
+  // colour step and setStrokeProps deliberately skips shapes without.
+  function applyAppearance(doc, ids, ap, opts = {}) {
+    setFill(doc, ids, ap.fill);
+    setStroke(doc, ids, ap.stroke);
+    if (ap.strokeAttrs) setStrokeProps(doc, ids, ap.strokeAttrs);
+    if (opts.opacity !== false && ap.opacity != null) setOpacity(doc, ids, ap.opacity);
+  }
+
+  // Shift+X: every shape trades its own fill for its own stroke color, so a
+  // mixed selection stays meaningful instead of collapsing to one pair.
+  function swapFillStroke(doc, ids) {
+    for (const s of doc.shapes.filter(s => ids.indexOf(s.id) >= 0)) {
+      const fill = paintColor(s.fill, s.fillInfo);
+      const stroke = s.stroke ? paintColor(s.stroke.color, s.strokeInfo) : null;
+      setFill(doc, [s.id], stroke);
+      setStroke(doc, [s.id], fill);
+    }
+  }
+
+  // "6 3" / [6,3] -> [6,3]; anything all-zero or empty means solid (null).
+  function parseDash(d) {
+    const list = (Array.isArray(d) ? d : String(d == null ? '' : d).trim().split(/[\s,]+/))
+      .map(Number).filter(v => isFinite(v) && v >= 0);
+    return list.length && list.some(v => v > 0) ? list : null;
+  }
+
+  function strokeProp(stroke, key) {
+    if (!stroke) return STROKE_DEFAULTS[key];
+    const v = stroke[key];
+    return v == null ? STROKE_DEFAULTS[key] : v;
+  }
+
+  // ---------- path offsetting ----------
+  // An aligned stroke is a centered stroke drawn on the path pushed half its
+  // weight to one side, so inside/outside alignment needs a genuine offset
+  // path. Curves are flattened adaptively first: the offset of a cubic is not
+  // a cubic, and the self-intersection pruning below only works on polylines.
+  // OFFSET_TOL is in points, so the result is smooth well past print
+  // resolution no matter how far the shape is zoomed.
+  const OFFSET_TOL = 0.05;
+  const INNER_TRIM_CAP = 20; // how far past |d| an inner corner may reach
+
+  // Split a cubic until the control points sit within tol of the chord.
+  function flatCubic(out, x0, y0, x1, y1, x2, y2, x3, y3, tol, depth) {
+    const dx = x3 - x0, dy = y3 - y0;
+    const len = Math.hypot(dx, dy);
+    const flat = len > 1e-9
+      ? (Math.abs((x1 - x0) * dy - (y1 - y0) * dx) + Math.abs((x2 - x0) * dy - (y2 - y0) * dx)) / len
+      : Math.hypot(x1 - x0, y1 - y0) + Math.hypot(x2 - x0, y2 - y0);
+    if (flat <= tol || depth > 16) { out.push([x3, y3]); return; }
+    const x01 = (x0 + x1) / 2, y01 = (y0 + y1) / 2;
+    const x12 = (x1 + x2) / 2, y12 = (y1 + y2) / 2;
+    const x23 = (x2 + x3) / 2, y23 = (y2 + y3) / 2;
+    const xa = (x01 + x12) / 2, ya = (y01 + y12) / 2;
+    const xb = (x12 + x23) / 2, yb = (y12 + y23) / 2;
+    const xm = (xa + xb) / 2, ym = (ya + yb) / 2;
+    flatCubic(out, x0, y0, x01, y01, xa, ya, xm, ym, tol, depth + 1);
+    flatCubic(out, xm, ym, xb, yb, x23, y23, x3, y3, tol, depth + 1);
+  }
+
+  // Like flattenPath but accuracy-driven rather than fixed-step, and with
+  // duplicate points removed so every segment has a well-defined normal.
+  function flattenAdaptive(cmds, tol = OFFSET_TOL) {
+    const subs = [];
+    let cur = null, sx = 0, sy = 0, px = 0, py = 0;
+    for (const c of cmds) {
+      if (c[0] === 'M') {
+        cur = { pts: [[c[1], c[2]]], closed: false };
+        subs.push(cur);
+        px = sx = c[1]; py = sy = c[2];
+      } else if (!cur) continue;
+      else if (c[0] === 'L') { cur.pts.push([c[1], c[2]]); px = c[1]; py = c[2]; }
+      else if (c[0] === 'C') {
+        flatCubic(cur.pts, px, py, c[1], c[2], c[3], c[4], c[5], c[6], tol, 0);
+        px = c[5]; py = c[6];
+      } else if (c[0] === 'Z') { cur.closed = true; px = sx; py = sy; }
+    }
+    for (const s of subs) {
+      const p = [];
+      for (const q of s.pts) {
+        const last = p[p.length - 1];
+        if (!last || Math.abs(last[0] - q[0]) > 1e-9 || Math.abs(last[1] - q[1]) > 1e-9) p.push(q);
+      }
+      if (s.closed && p.length > 1) {
+        const a = p[0], b = p[p.length - 1];
+        if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) p.pop();
+      }
+      s.pts = p;
+    }
+    return subs.filter(s => s.pts.length > 1);
+  }
+
+  // Shoelace in y-down document space: positive area means the interior lies
+  // along the (-dy, dx) normal, which is the direction offsetPath calls "in".
+  function subpathArea(pts) {
+    let a = 0;
+    for (let i = 0, n = pts.length; i < n; i++) {
+      const p = pts[i], q = pts[(i + 1) % n];
+      a += p[0] * q[1] - q[0] * p[1];
+    }
+    return a / 2;
+  }
+
+  // Where two rays cross, or null when they are parallel.
+  function rayCross(px, py, ux, uy, qx, qy, vx, vy) {
+    const den = ux * vy - uy * vx;
+    if (Math.abs(den) < 1e-12) return null;
+    const t = ((qx - px) * vy - (qy - py) * vx) / den;
+    return [px + ux * t, py + uy * t];
+  }
+
+  // Squared, because pruning calls this hundreds of thousands of times on
+  // heavy artwork and only ever compares it against a fixed limit.
+  function ptSegDist2(x, y, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const L2 = dx * dx + dy * dy;
+    let t = L2 ? ((x - ax) * dx + (y - ay) * dy) / L2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + t * dx - x, ey = ay + t * dy - y;
+    return ex * ex + ey * ey;
+  }
+
+  // Raw offset of one polyline: every segment slides along its normal, and the
+  // gaps that opens at corners are filled with the stroke's own join, so the
+  // corners of an aligned stroke look like the corners of a centered one.
+  function offsetSubpath(pts, closed, d, join, miterLimit, tol) {
+    const n = pts.length;
+    const segs = [];
+    for (let i = 0, last = closed ? n : n - 1; i < last; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const L = Math.hypot(dx, dy);
+      if (L < 1e-9) continue;
+      segs.push({ a, b, ux: dx / L, uy: dy / L, nx: -dy / L, ny: dx / L });
+    }
+    if (!segs.length) return null;
+
+    const out = [];
+    const put = (x, y) => {
+      const p = out[out.length - 1];
+      if (!p || Math.abs(p[0] - x) > 1e-9 || Math.abs(p[1] - y) > 1e-9) out.push([x, y]);
+    };
+    const r = Math.abs(d);
+    const arcStep = r > tol ? Math.max(0.05, 2 * Math.acos(Math.max(-1, 1 - tol / r))) : Math.PI / 2;
+
+    function joinAt(p, prev, cur) {
+      const p0x = p[0] + prev.nx * d, p0y = p[1] + prev.ny * d;
+      const p1x = p[0] + cur.nx * d, p1y = p[1] + cur.ny * d;
+      const cross = prev.ux * cur.uy - prev.uy * cur.ux;
+      const dot = prev.ux * cur.ux + prev.uy * cur.uy;
+      // A turn only needs corner geometry once it opens a gap wider than tol.
+      // Below that one point covers it, which keeps a flattened curve from
+      // paying for a join at every single vertex.
+      if (dot > 0 && r * Math.abs(cross) <= tol) { put(p0x, p0y); return; }
+      // cross * d < 0 means the two offset ends pull apart and the gap is a
+      // real join; otherwise they cross and the corner trims to that crossing.
+      const gap = cross * d < 0;
+      const halfSin = Math.sqrt(Math.max(0, (1 + dot) / 2)); // sin(interior/2)
+      const withinMiter = halfSin > 1e-9 && 1 / halfSin <= miterLimit;
+      if (!gap || (join === 'miter' && withinMiter)) {
+        const ip = rayCross(p0x, p0y, prev.ux, prev.uy, p1x, p1y, cur.ux, cur.uy);
+        if (ip && Math.hypot(ip[0] - p[0], ip[1] - p[1]) <= r * INNER_TRIM_CAP) {
+          put(ip[0], ip[1]);
+          return;
+        }
+      } else if (join === 'round') {
+        const a0 = Math.atan2(p0y - p[1], p0x - p[0]);
+        let da = Math.atan2(p1y - p[1], p1x - p[0]) - a0;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        const steps = Math.max(1, Math.ceil(Math.abs(da) / arcStep));
+        for (let k = 0; k <= steps; k++) {
+          const a = a0 + da * (k / steps);
+          put(p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r);
+        }
+        return;
+      }
+      put(p0x, p0y); put(p1x, p1y); // bevel, over-limit miter, runaway corner
+    }
+
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const prev = i > 0 ? segs[i - 1] : (closed ? segs[segs.length - 1] : null);
+      if (prev) joinAt(s.a, prev, s);
+      else put(s.a[0] + s.nx * d, s.a[1] + s.ny * d);
+      put(s.b[0] + s.nx * d, s.b[1] + s.ny * d);
+    }
+    if (closed && out.length > 1) {
+      const a = out[0], b = out[out.length - 1];
+      if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) out.pop();
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  // Uniform grid over the source segments, so pruning does not have to measure
+  // every offset point against every source segment. Cells are 2·|d| across
+  // and each segment is sampled every half cell, which puts any source within
+  // |d| of a query point in the 3×3 block around that point's own cell.
+  // Segment endpoints live in one flat array and cells key on a packed integer
+  // — pruning runs per offset point, so allocation is what costs here.
+  const GRID_BIAS = 1 << 20;
+
+  function segGrid(subs, cell) {
+    const map = new Map();
+    const xs = [];
+    const put = (key, seg) => {
+      let bucket = map.get(key);
+      if (!bucket) map.set(key, bucket = []);
+      if (bucket[bucket.length - 1] !== seg) bucket.push(seg);
+    };
+    for (const s of subs) {
+      const n = s.pts.length;
+      for (let i = 0, last = s.closed ? n : n - 1; i < last; i++) {
+        const a = s.pts[i], b = s.pts[(i + 1) % n];
+        const seg = xs.length;
+        xs.push(a[0], a[1], b[0], b[1]);
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / (cell / 2)));
+        let prev = -1;
+        for (let k = 0; k <= steps; k++) {
+          const t = k / steps;
+          const key = (Math.floor((a[0] + dx * t) / cell) + GRID_BIAS) * 2 * GRID_BIAS +
+            Math.floor((a[1] + dy * t) / cell) + GRID_BIAS;
+          if (key === prev) continue;
+          prev = key;
+          put(key, seg);
+        }
+      }
+    }
+    return { cell, map, xs };
+  }
+
+  function nearSource(grid, x, y, lim2) {
+    const cell = grid.cell, xs = grid.xs;
+    const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+    for (let i = -1; i <= 1; i++) {
+      const row = (cx + i + GRID_BIAS) * 2 * GRID_BIAS;
+      for (let j = -1; j <= 1; j++) {
+        const bucket = grid.map.get(row + cy + j + GRID_BIAS);
+        if (!bucket) continue;
+        for (let k = 0; k < bucket.length; k++) {
+          const o = bucket[k];
+          if (ptSegDist2(x, y, xs[o], xs[o + 1], xs[o + 2], xs[o + 3]) < lim2) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Every point of a true offset sits exactly |d| from the source. Anything
+  // the raw offset put closer than that is inside the swept band — the loops a
+  // corner throws when the offset outruns the local feature size — so drop it
+  // and let the surviving runs bridge straight across the hole they leave.
+  function pruneOffset(raw, closed, grid, lim) {
+    const lim2 = lim * lim;
+    const keep = raw.map(p => !nearSource(grid, p[0], p[1], lim2));
+    if (keep.every(Boolean)) return raw;
+    const start = closed ? Math.max(0, keep.indexOf(false)) : 0;
+    const out = [];
+    for (let i = 0; i < raw.length; i++) {
+      const j = (start + i) % raw.length;
+      if (keep[j]) out.push(raw[j]);
+    }
+    return out.length > 1 ? out : null;
+  }
+
+  // Offset a path by d, positive meaning toward the filled side. Returns M/L/Z
+  // commands, or null when the offset eats the shape entirely (an inside
+  // stroke wider than the shape is thick).
+  function offsetPath(cmds, d, opts = {}) {
+    const tol = opts.tol > 0 ? opts.tol : OFFSET_TOL;
+    const join = STROKE_JOINS[opts.join] ? opts.join : STROKE_DEFAULTS.join;
+    const miterLimit = opts.miterLimit > 1 ? opts.miterLimit : STROKE_DEFAULTS.miter;
+    const subs = flattenAdaptive(cmds, tol);
+    if (!subs.length) return null;
+    if (Math.abs(d) < 1e-9) return cmds.slice();
+    // Winding picks the side; a reversed outer contour flips the whole shape,
+    // while holes wind the other way already and take care of themselves.
+    let area = 0;
+    for (const s of subs) if (s.closed) area += subpathArea(s.pts);
+    const dd = area < 0 ? -d : d;
+    const lim = Math.abs(dd) - Math.max(tol * 2, Math.abs(dd) * 1e-3);
+    const grid = lim > 0 ? segGrid(subs, Math.max(2 * Math.abs(dd), 1e-6)) : null;
+    const out = [];
+    for (const s of subs) {
+      let pts = offsetSubpath(s.pts, s.closed, dd, join, miterLimit, tol);
+      if (pts && grid) pts = pruneOffset(pts, s.closed, grid, lim);
+      if (!pts || pts.length < 2) continue;
+      out.push(['M', pts[0][0], pts[0][1]]);
+      for (let i = 1; i < pts.length; i++) out.push(['L', pts[i][0], pts[i][1]]);
+      if (s.closed) out.push(['Z']);
+    }
+    return out.length ? out : null;
+  }
+
+  // The offset path an aligned stroke actually rides on, or null for a
+  // centered stroke (and for a stroke whose offset collapsed).
+  function strokeOffsetPath(cmds, stroke) {
+    const align = strokeProp(stroke, 'align');
+    if (!stroke || align === 'center' || !(stroke.w > 0)) return null;
+    return offsetPath(cmds, (align === 'inside' ? 1 : -1) * stroke.w / 2, {
+      join: strokeProp(stroke, 'join'), miterLimit: strokeProp(stroke, 'miter'),
+    });
+  }
+
+  // ---------- swatches ----------
+  // doc.swatches is the document palette. The PDF/.ai importer fills it from
+  // the inks it finds in the file; the Swatches panel edits it. A swatch is a
+  // color record plus a name, and spot inks (space 'separation') carry the ink
+  // name and its alternate build so plates survive a round trip.
+  function defaultSwatchName(col) {
+    if (col.space === 'separation') return col.name || 'Spot';
+    if (col.space === 'cmyk') {
+      return col.values.map((v, i) => 'CMYK'[i] + '=' + Math.round(v * 100)).join(' ');
+    }
+    if (col.space === 'gray') return 'Gray ' + Math.round(col.values[0] * 100);
+    return col.values.map((v, i) => 'RGB'[i] + '=' + Math.round(v * 255)).join(' ');
+  }
+
+  function makeSwatch(o) {
+    const col = makeColor(o);
+    if (!col) return null;
+    const sw = {
+      name: String((o && o.name) || defaultSwatchName(col)),
+      space: col.space, values: col.values, rgb: col.rgb,
+    };
+    if (col.alt) sw.alt = col.alt;
+    sw.spot = col.space === 'separation';
+    return sw;
+  }
+
+  // Identity for dedupe: same space and components, and for spots the same
+  // ink name — two different inks may well share an alternate build.
+  function swatchKey(sw) {
+    return sw.space + '|' + (sw.spot ? sw.name : '') + '|' + sw.values.map(v => v.toFixed(4)).join(',');
+  }
+
+  function findSwatch(doc, col) {
+    const sw = makeSwatch(col);
+    if (!sw) return -1;
+    const key = swatchKey(sw);
+    return (doc.swatches || []).findIndex(s => swatchKey(s) === key);
+  }
+
+  function addSwatch(doc, col, name) {
+    if (!Array.isArray(doc.swatches)) doc.swatches = [];
+    const sw = makeSwatch(name ? { ...col, name } : col);
+    if (!sw) return null;
+    const i = findSwatch(doc, sw);
+    if (i >= 0) return doc.swatches[i];
+    doc.swatches.push(sw);
+    return sw;
+  }
+
+  function removeSwatch(doc, i) {
+    if (!Array.isArray(doc.swatches) || i < 0 || i >= doc.swatches.length) return false;
+    doc.swatches.splice(i, 1);
+    return true;
+  }
+
+  function renameSwatch(doc, i, name) {
+    const sw = Array.isArray(doc.swatches) ? doc.swatches[i] : null;
+    if (!sw || !String(name || '').trim()) return false;
+    sw.name = String(name).trim();
+    return true;
+  }
+
+  function swatchColor(sw) { return makeColor(sw); }
+
+  // The palette a brand-new document starts with: Illustrator's process
+  // basics, as CMYK builds because this app exists for print work.
+  function defaultSwatches() {
+    return [
+      { name: 'White', space: 'cmyk', values: [0, 0, 0, 0] },
+      { name: 'Black', space: 'cmyk', values: [0, 0, 0, 1] },
+      { name: 'Cyan', space: 'cmyk', values: [1, 0, 0, 0] },
+      { name: 'Magenta', space: 'cmyk', values: [0, 1, 0, 0] },
+      { name: 'Yellow', space: 'cmyk', values: [0, 0, 1, 0] },
+      { name: 'Red', space: 'cmyk', values: [0, 1, 1, 0] },
+      { name: 'Green', space: 'cmyk', values: [0.75, 0, 1, 0] },
+      { name: 'Blue', space: 'cmyk', values: [1, 0.9, 0.1, 0] },
+    ].map(makeSwatch);
+  }
+
   // ---------- serialization (.aqv project format) ----------
   const APP_ID = 'aq-vector-studio';
   const FORMAT_VERSION = 1;
@@ -439,6 +1461,7 @@ const VECCORE = (() => {
       || d.artboard.w <= 0 || d.artboard.h <= 0) throw new Error('bad artboard');
     if (!PT_PER[d.units]) d.units = 'in';
     if (typeof d.name !== 'string' || !d.name) d.name = 'Untitled';
+    if (typeof d.substrate !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(d.substrate)) d.substrate = null;
     if (!Array.isArray(d.layers) || !d.layers.length) {
       d.layers = [{ id: 'L1', name: 'Layer 1', visible: true, locked: false }];
     }
@@ -461,12 +1484,28 @@ const VECCORE = (() => {
           if (typeof c[i] !== 'number' || !isFinite(c[i])) throw new Error('bad path coordinate');
         }
       }
-      s.type = 'path';
+      // Placed rasters are ordinary shapes whose cmds are the placement frame,
+      // so every transform/selection path works on them unchanged.
+      s.type = s.type === 'image' ? 'image' : 'path';
+      if (s.type === 'image') {
+        if (typeof s.src !== 'string' || !s.src) throw new Error('bad image source');
+        if (!isFinite(s.iw) || !isFinite(s.ih) || s.iw <= 0 || s.ih <= 0) throw new Error('bad image size');
+      }
       if (!layerIds.has(s.layer)) s.layer = d.layers[0].id;
       if (s.opacity == null || !isFinite(s.opacity)) s.opacity = 1;
+      s.hidden = !!s.hidden;
+      s.locked = !!s.locked;
+      if (!isFinite(s.angle)) s.angle = 0;
+      if (!isFinite(s.shear)) s.shear = 0;
       if (s.fill != null && typeof s.fill !== 'string') s.fill = null;
       if (s.stroke != null && (typeof s.stroke !== 'object' || typeof s.stroke.color !== 'string'
         || !isFinite(s.stroke.w))) s.stroke = null;
+      if (s.stroke) healStroke(s.stroke);
+      for (const key of ['fillInfo', 'strokeInfo']) {
+        if (s[key] === undefined) continue;
+        const info = healColorInfo(s[key]);
+        if (info) s[key] = info; else delete s[key];
+      }
       const m = typeof s.id === 'string' && /^S(\d+)$/.exec(s.id);
       if (m) maxId = Math.max(maxId, +m[1]); else s.id = null;
     }
@@ -493,10 +1532,46 @@ const VECCORE = (() => {
     for (const s of d.shapes) {
       if (s.group != null && !gids.has(s.group)) s.group = null;
     }
+    // palette: drop anything that isn't a usable color, normalize the rest
+    d.swatches = Array.isArray(d.swatches) ? d.swatches.map(makeSwatch).filter(Boolean) : [];
     let next = Math.max(isFinite(d.nextId) ? d.nextId : 1, maxId + 1);
     for (const s of d.shapes) if (!s.id) s.id = 'S' + next++;
     d.nextId = Math.max(next, maxId + 1);
+    normalizeZ(d); // keep layer blocks contiguous even in hand-edited files
     return d;
+  }
+
+  // Keep stroke extras only when they name something real; the renderer and
+  // the exporter fill in STROKE_DEFAULTS for whatever is absent.
+  function healStroke(st) {
+    st.w = Math.max(0, st.w);
+    if (!STROKE_CAPS[st.cap]) delete st.cap;
+    if (!STROKE_JOINS[st.join]) delete st.join;
+    if (!STROKE_ALIGNS[st.align]) delete st.align;
+    if (st.miter !== undefined && (!isFinite(st.miter) || st.miter < 1)) delete st.miter;
+    if (st.dash !== undefined) {
+      const d = parseDash(st.dash);
+      if (d) st.dash = d; else delete st.dash;
+    }
+  }
+
+  // Print-color data on a shape: keep it only if it is structurally sound,
+  // otherwise drop it and let the hex preview stand on its own.
+  function healColorInfo(info) {
+    if (!info || typeof info !== 'object' || !PRINT_SPACES[info.space]) return null;
+    const n = COLOR_SPACES[info.space];
+    if (!Array.isArray(info.values) || info.values.length < n) return null;
+    if (!info.values.slice(0, n).every(v => typeof v === 'number' && isFinite(v))) return null;
+    const o = { space: info.space, values: info.values.slice(0, n).map(clamp01) };
+    if (info.space === 'separation') o.name = String(info.name || 'Spot');
+    const a = info.alt;
+    if (a && COLOR_SPACES[a.space] && a.space !== 'separation' && Array.isArray(a.values)) {
+      const an = COLOR_SPACES[a.space];
+      if (a.values.length >= an && a.values.slice(0, an).every(v => typeof v === 'number' && isFinite(v))) {
+        o.alt = { space: a.space, values: a.values.slice(0, an).map(clamp01) };
+      }
+    }
+    return o;
   }
 
   // ---------- history (undo/redo) ----------
@@ -520,35 +1595,65 @@ const VECCORE = (() => {
   function redo(h) { return canRedo(h) ? parseDoc(h.stack[++h.idx]) : null; }
 
   // ---------- demo content (placeholder until real docs/import land) ----------
+  // Carries print color (CMYK builds plus one spot ink) so the separations
+  // panel has real inks to show on a fresh document.
+  const DEMO_SPOT = 'AQUAMENTOR GREEN';
   function demoDoc() {
     const doc = newDoc({ w: 8.5, h: 11, units: 'in' });
+    // one spot ink in the palette so the Swatches panel shows a real plate
+    const spot = addSwatch(doc, {
+      space: 'separation', name: 'Aquamentor Green', values: [1],
+      alt: { space: 'cmyk', values: [0.4, 0, 0.65, 0.3] },
+    });
+    const spotCol = swatchColor(spot);
     addShape(doc, {
       type: 'path', name: 'Rounded rect',
-      fill: '#2f6fb3', stroke: null, opacity: 1,
+      fill: colorHex(makeColor({ space: 'cmyk', values: [0.74, 0.38, 0, 0.3] })),
+      fillInfo: { space: 'cmyk', values: [0.74, 0.38, 0, 0.3] },
+      stroke: null, opacity: 1,
       cmds: rectPath(1 * 72, 1 * 72, 3 * 72, 2 * 72, 18),
     });
     addShape(doc, {
       type: 'path', name: 'Spot green circle',
-      fill: '#6cb33f', stroke: { color: '#1d1d1b', w: 1.5 }, opacity: 1,
+      fill: colorHex(spotCol), fillInfo: colorInfo(spotCol),
+      stroke: { color: '#1d1d1b', w: 1.5 },
+      strokeInfo: { space: 'cmyk', values: [0, 0, 0, 0.89] },
+      opacity: 1,
       cmds: ellipsePath(5.5 * 72, 3.4 * 72, 1.2 * 72, 1.2 * 72),
     });
     addShape(doc, {
       type: 'path', name: 'Star',
-      fill: '#e8862e', stroke: null, opacity: 1,
+      fill: colorHex(makeColor({ space: 'cmyk', values: [0, 0.42, 0.8, 0.09] })),
+      fillInfo: { space: 'cmyk', values: [0, 0.42, 0.8, 0.09] },
+      stroke: null, opacity: 1,
       cmds: starPath(3.4 * 72, 6.6 * 72, 1.5 * 72, 0.62 * 72, 5),
     });
     return doc;
   }
 
   return {
-    PT_PER, PX_PER_PT_100, KAPPA,
+    PT_PER, PX_PER_PT_100, KAPPA, DEG, REF_FRAC, toPt, fromPt,
+    COLOR_SPACES, PRINT_SPACES, STROKE_CAPS, STROKE_JOINS, STROKE_ALIGNS, STROKE_DEFAULTS,
     newDoc, addShape,
+    clamp01, hexToRgb, rgbToHex, cmykToRgb, rgbToCmyk, rgbToHsb, hsbToRgb, spaceToRgb,
+    makeColor, colorHex, colorInfo, paintColor, colorEquals,
+    setFill, setStroke, setStrokeProps, setOpacity, swapFillStroke, parseDash, strokeProp,
+    strokeAttrs, shapeAppearance, applyAppearance,
+    OFFSET_TOL, flattenAdaptive, subpathArea, offsetPath, strokeOffsetPath,
+    makeSwatch, swatchKey, swatchColor, findSwatch, addSwatch, removeSwatch, renameSwatch,
+    defaultSwatches, defaultSwatchName,
     newView, w2s, s2w, zoomAt, panBy, fitRect, zoomPct,
-    rectPath, ellipsePath, starPath, pathBBox,
-    mMul, mTranslate, mScale, mRotate, mApply, transformCmds,
+    rectPath, ellipsePath, starPath, dragRect, pathBBox,
+    anchorKey, handleKey, pathToAnchors, anchorsToPath, moveAnchor, isSmoothAnchor,
+    moveHandle, deleteAnchors, hitAnchor, hitAnchorHandle, anchorsInRect,
+    mMul, mTranslate, mScale, mRotate, mShear, mApply, transformCmds,
+    refPoint, normAngle, transformMatrix, transformSelection, selectionAngles,
     flattenPath, tightBBox, shapesBBox, hitTestShape, rectsIntersect,
     rootGroupOf, expandIds, selectionUnits, groupShapes, ungroupShapes, duplicateShapes,
     bringToFront, sendToBack, bringForward, sendBackward, alignUnits,
+    layerIndex, layerOf, normalizeZ, addLayer, deleteLayer, renameLayer,
+    reorderLayers, duplicateLayer, moveShapesToLayer, pruneGroups, layerTree,
+    lockShapes, hideShapes, unlockAll, showAll,
     serializeDoc, parseDoc,
     newHistory, commit, canUndo, canRedo, undo, redo,
     demoDoc,

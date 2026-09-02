@@ -4,14 +4,15 @@
 //
 // Color capture: shapes render with hex fills like everything else, but
 // non-RGB source colors (CMYK builds, grayscale, spot inks) keep their
-// print data in shape.fillInfo / shape.strokeInfo — {space, values, name}
-// — and the document gets a doc.swatches palette. Export prefers that
-// info over the hex preview, so CMYK/gray survive an import→edit→export
-// trip; spot plates can build on doc.swatches later.
+// print data in shape.fillInfo / shape.strokeInfo — {space, values, name,
+// alt} — and the document gets a doc.swatches palette. Export prefers that
+// info over the hex preview, so CMYK/gray/spot survive an import→edit→export
+// trip, and separation plates build on the same data (see separate.js).
 const PDFIO = (() => {
   'use strict';
 
   const C = typeof VECCORE !== 'undefined' ? VECCORE : require('./veccore.js');
+  const S = typeof SEPARATE !== 'undefined' ? SEPARATE : require('./separate.js');
   const P = (() => {
     if (typeof VecPDF !== 'undefined') return VecPDF;
     const api = require('./pdfimport.js');
@@ -41,13 +42,18 @@ const PDFIO = (() => {
     if (!col || !PRINT_SPACES[col.space]) return null;
     const o = { space: col.space, values: col.values.slice() };
     if (col.name) o.name = col.name;
+    // A spot's alternate space is its ink definition — keep it so plates can
+    // re-emit the separation instead of guessing the ink back out of RGB.
+    if (col.alt) o.alt = { space: col.alt.space, values: col.alt.values.slice() };
     return o;
   }
 
   // veccore fill/stroke (+ optional info) -> VecPDF color
   function toExportColor(hex, info) {
     if (info && PRINT_SPACES[info.space] && Array.isArray(info.values)) {
-      return { space: info.space, values: info.values.slice(), rgb: hexToRgb(hex), name: info.name };
+      const col = { space: info.space, values: info.values.slice(), rgb: hexToRgb(hex), name: info.name };
+      if (info.alt) col.alt = { space: info.alt.space, values: info.alt.values.slice() };
+      return col;
     }
     const rgb = hexToRgb(hex);
     return { space: 'rgb', values: rgb, rgb };
@@ -123,46 +129,136 @@ const PDFIO = (() => {
     const doc = C.newDoc({ w: page.width / 72, h: page.height / 72, units: 'in' });
     doc.name = String(filename || 'Imported').replace(/\.(pdf|ai)$/i, '');
     for (const s of shapesFromPage(page)) C.addShape(doc, s);
-    doc.swatches = parsed.colors.map(c => ({
-      space: c.space, values: c.values, rgb: c.rgb, name: c.name || null, uses: c.uses,
-    }));
+    // The captured palette becomes the document's swatches, spot inks and all.
+    doc.swatches = parsed.colors.map(c => C.makeSwatch(c)).filter(Boolean);
     return { doc, pageCount: parsed.pageCount, isAI: parsed.isAI, colors: parsed.colors };
   }
 
   // ---------- export ----------
-  // Visible-layer shapes only, in z order. Opacity is not representable in
-  // the flat exporter and is dropped (shapes export fully opaque).
+  // One veccore shape -> VecPDF shape, or null when there is nothing to paint.
+  // Carries stroke attributes and per-object opacity across to the writer.
+  function exportShape(s) {
+    const subpaths = subpathsFromCmds(s.cmds);
+    if (!subpaths.length) return null;
+    if (s.fill == null && !s.stroke) return null;
+    const o = {
+      subpaths,
+      fill: s.fill != null ? toExportColor(s.fill, s.fillInfo) : null,
+      stroke: s.stroke ? toExportColor(s.stroke.color, s.strokeInfo) : null,
+      strokeWidth: s.stroke ? s.stroke.w : 0,
+      opacity: s.opacity == null ? 1 : s.opacity,
+      fillRule: 'nonzero',
+    };
+    if (s.stroke) {
+      o.strokeCap = C.strokeProp(s.stroke, 'cap');
+      o.strokeJoin = C.strokeProp(s.stroke, 'join');
+      o.strokeMiter = C.strokeProp(s.stroke, 'miter');
+      o.strokeAlign = C.strokeProp(s.stroke, 'align');
+      if (s.stroke.dash) o.strokeDash = s.stroke.dash.slice();
+      // An aligned stroke exports as a centered stroke on the real offset
+      // path; the writer only falls back to fattening-and-clipping when the
+      // offset collapses. Offsetting lives in veccore, so it is resolved
+      // here rather than inside the (veccore-free) PDF writer.
+      const off = C.strokeOffsetPath(s.cmds, s.stroke);
+      if (off) o.strokeOffsetPath = subpathsFromCmds(off);
+    }
+    if (s.overprint != null) o.overprint = !!s.overprint;
+    return o;
+  }
+
+  // Visible-layer shapes only, in z order.
   function exportShapes(doc) {
     const hidden = new Set((doc.layers || []).filter(l => !l.visible).map(l => l.id));
     const out = [];
     for (const s of doc.shapes) {
       if (hidden.has(s.layer)) continue;
-      const subpaths = subpathsFromCmds(s.cmds);
-      if (!subpaths.length) continue;
-      if (s.fill == null && !s.stroke) continue;
-      out.push({
-        subpaths,
-        fill: s.fill != null ? toExportColor(s.fill, s.fillInfo) : null,
-        stroke: s.stroke ? toExportColor(s.stroke.color, s.strokeInfo) : null,
-        strokeWidth: s.stroke ? s.stroke.w : 0,
-        fillRule: 'nonzero',
-      });
+      const e = exportShape(s);
+      if (e) out.push(e);
     }
     return out;
   }
 
-  // Flat vector PDF of the whole artboard. Returns a Uint8Array.
+  // Flat vector PDF of the whole artboard, on its substrate if the piece has
+  // one — the file should look like the thing being made. Returns a Uint8Array.
   function exportDocPDF(doc) {
     return P.exportPDF({
       width: doc.artboard.w,
       height: doc.artboard.h,
+      substrate: S.substrateColor(doc),
       shapes: exportShapes(doc),
       title: doc.name || 'Untitled',
     });
   }
 
+  // ---------- separation plates ----------
+  // An ink whose alternate is blank paper (0/0/0/0 — white ink, the usual
+  // case on colored foam) would render invisible in every viewer, so the
+  // plate's *alternate* falls back to a light gray. The ink name and tint —
+  // the only things the press reads — are untouched.
+  const BLANK_ALT = [0, 0, 0, 0.2];
+
+  function plateInk(ink) {
+    const cmyk = ink.cmyk.slice(0, 4);
+    const blank = cmyk.every(v => v <= 1e-4);
+    return { name: ink.name, type: ink.type, cmyk: blank ? BLANK_ALT.slice() : cmyk };
+  }
+
+  // Build the VecPDF plate description for one separated plate.
+  //
+  // Color layer: the whole artwork in its own colors, for reference — the
+  // press desk checks the plate against the job it came from. On a colored
+  // substrate it is backed by the material color, so white ink reads the way
+  // it will on the piece instead of vanishing into the page. Spot layer: only
+  // what this ink actually prints. That layer is the plate.
+  function platePDFDoc(doc, plate, opts = {}) {
+    const colorShapes = [], spotShapes = [];
+    for (const s of S.printableShapes(doc)) {
+      const base = exportShape(s);
+      if (base) colorShapes.push(base);
+    }
+    for (const e of plate.entries) {
+      const base = exportShape(e.shape);
+      if (!base) continue;
+      const spot = {
+        subpaths: base.subpaths,
+        fillTint: e.fillTint,
+        strokeTint: e.strokeTint,
+        strokeWidth: base.strokeWidth,
+        fillRule: base.fillRule,
+      };
+      // A knockout hole must never overprint, or it would not clear the plate.
+      if (e.knockout) spot.overprint = false;
+      else if (e.shape.overprint != null) spot.overprint = !!e.shape.overprint;
+      spotShapes.push(spot);
+    }
+    return {
+      width: doc.artboard.w,
+      height: doc.artboard.h,
+      ink: plateInk(plate.ink),
+      substrate: S.substrateColor(doc),
+      substrateName: S.substrateOf(doc),
+      colorShapes, spotShapes,
+      marks: opts.marks !== false,
+      margin: opts.margin,
+      title: doc.name || 'Untitled',
+    };
+  }
+
+  // Every ink in the document as its own press-ready plate PDF.
+  // Returns [{ink, filename, objects, knockouts, bytes}].
+  function exportPlatePDFs(doc, opts = {}) {
+    return S.separatePlates(doc, opts).map(plate => ({
+      ink: plate.ink,
+      filename: S.plateFilename(doc, plate.ink),
+      objects: plate.objects,
+      knockouts: plate.knockouts,
+      bytes: P.exportPlatePDF(platePDFDoc(doc, plate, opts)),
+    }));
+  }
+
   return {
-    docFromPDF, exportDocPDF, exportShapes, shapesFromPage,
+    docFromPDF, exportDocPDF, exportShape, exportShapes, shapesFromPage,
+    exportPlatePDFs, platePDFDoc,
     cmdsFromSubpaths, subpathsFromCmds, rgbToHex, hexToRgb,
   };
 })();
