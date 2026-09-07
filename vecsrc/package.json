@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node engine/build.js",
     "test": "node engine/vectest.js && node engine/pdfiotest.js && node engine/tracetest.js && node engine/separatetest.js",
-    "uitest": "node engine/uitest.js"
+    "uitest": "node engine/uitest.js",
+    "bench": "node engine/bench.js"
   }
 }
