@@ -170,7 +170,7 @@ function cmdBBox(cmds) { return C.tightBBox(cmds); }
     });
 
     const bytes = PDFIO.exportDocPDF(doc);
-    ok(bytes instanceof Uint8Array && String.fromCharCode(...bytes.slice(0, 8)) === '%PDF-1.4',
+    ok(bytes instanceof Uint8Array && /^%PDF-1\.\d$/.test(String.fromCharCode(...bytes.slice(0, 8))),
       'export: produces a PDF');
 
     const re = await VecPDF.parsePDF(bytes);
@@ -181,6 +181,54 @@ function cmdBBox(cmds) { return C.tightBBox(cmds); }
       'export: fill+stroke round-trip');
     ok(ell.subpaths[0].segments.every(s => s.type === 'cubic'), 'export: ellipse cubics kept');
     ok(cyan.fill.space === 'cmyk' && near(cyan.fill.values[0], 1), 'export: CMYK written natively');
+
+    // a piece on colored stock exports on that stock, so the file looks like
+    // the thing being made instead of like artwork floating on white
+    doc.substrate = '#1f4e79';
+    const onFoam = await VecPDF.parsePDF(PDFIO.exportDocPDF(doc));
+    const shapes = onFoam.pages[0].shapes;
+    ok(shapes.length === 4, 'export: substrate adds one panel under the art');
+    const back = shapes[0];
+    ok(back.fill.space === 'cmyk' && near(back.fill.rgb[2], 0.4745),
+      'export: the substrate is written as a print color');
+    const bb = cmdBBox(PDFIO.cmdsFromSubpaths(back.subpaths));
+    ok(near(bb.x, 0) && near(bb.y, 0) && near(bb.w, 360) && near(bb.h, 288),
+      'export: the substrate covers the artboard');
+    doc.substrate = '#ffffff';
+    ok((await VecPDF.parsePDF(PDFIO.exportDocPDF(doc))).pages[0].shapes.length === 3,
+      'export: white paper is not a material and adds nothing');
+  }
+
+  // ---- export: spot inks stay plates, not RGB ----
+  {
+    const a = await PDFIO.docFromPDF(spotPDF(), 'inks.pdf');
+    const bytes = PDFIO.exportDocPDF(a.doc);
+    const raw = Buffer.from(bytes).toString('latin1');
+    ok(/\/Separation \/PANTONE#20185#20C \/DeviceCMYK/.test(raw), 'spot export: written as a real Separation');
+    ok(/\/CS0 cs 1 scn/.test(raw), 'spot export: painted through the separation colorspace');
+    const b = await PDFIO.docFromPDF(bytes, 'inks2.pdf');
+    const spot = b.doc.shapes[1];
+    ok(spot.fillInfo.space === 'separation' && spot.fillInfo.name === 'PANTONE 185 C',
+      'spot export: still a named ink after the round trip');
+    ok(near(spot.fillInfo.alt.values[1], 0.91) && near(spot.fillInfo.alt.values[2], 0.76),
+      'spot export: alternate CMYK build preserved');
+    ok(b.doc.swatches.some(s => s.spot && s.name === 'PANTONE 185 C'), 'spot export: ink back in the palette');
+  }
+
+  // ---- export: stroke attributes and opacity ----
+  {
+    const doc = C.newDoc({ w: 4, h: 4, units: 'in' });
+    C.addShape(doc, {
+      type: 'path', fill: '#ffffff', opacity: 0.4,
+      stroke: { color: '#000000', w: 3, cap: 'round', join: 'bevel', miter: 4, dash: [6, 3], align: 'inside' },
+      cmds: C.rectPath(20, 20, 100, 100),
+    });
+    const raw = Buffer.from(PDFIO.exportDocPDF(doc)).toString('latin1');
+    ok(/\n1 J\n/.test(raw) && /\n2 j\n/.test(raw) && /\n4 M\n/.test(raw), 'stroke export: cap/join/miter operators');
+    ok(/\n\[6 3\] 0 d\n/.test(raw), 'stroke export: dash pattern');
+    ok(/\nW n\n/.test(raw) && /\n3 w\n/.test(raw) && !/\n6 w\n/.test(raw),
+      'stroke export: inside align rides the offset path at its true weight');
+    ok(/\/ExtGState/.test(raw) && /\/ca 0\.4/.test(raw), 'stroke export: opacity as an ExtGState');
   }
 
   // ---- full circle: PDF -> veccore doc -> PDF -> veccore doc ----
